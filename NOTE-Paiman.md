@@ -1,0 +1,1 @@
+### In diesem Repo werden auch zwei sehr gute Grafana Dashboards verlinkt, welche vllt. relevant sind, falls das Frontend-Framework von HAMi-WebUI nicht verwendet wird.

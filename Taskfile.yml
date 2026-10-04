@@ -1,54 +1,202 @@
 version: "3"
 
+# Every check runs in the toolchain image built from hack/dev.Dockerfile, one
+# stage per check, so the host needs only docker and task and CI runs the exact
+# same tool versions. It is also the only way the checks see the whole tree:
+# much of internal/nvmlnative is behind a `linux && cgo` build tag, which a host
+# toolchain on macOS excludes from the build entirely, so a host linter reports
+# success without having read those files at all.
+#
+# The Go version comes from go.mod, so the toolchain cannot drift from what the
+# module declares.
+
 tasks:
   fmt:
-    desc: format code
+    desc: format code and scripts
     cmds:
-      - go mod tidy
-      - go fix ./...
-      - golangci-lint run --fix ./...
-      - golangci-lint fmt ./...
-      - git ls-files '*.sh' | xargs shfmt -w -i 2 -ci -sr
+      # the formatters write in place, so the working tree is bind-mounted
+      # rather than exported from a stage: the stage has no sources of its own.
+      # The container runs as the invoking user so nothing comes back
+      # root-owned, and a named volume keeps the Go and linter caches between
+      # runs instead of recompiling the world every time.
+      - >-
+        docker buildx build -f hack/dev.Dockerfile
+        --build-arg GO_VERSION="$(sed -n 's/^go //p' go.mod)"
+        --target fmt --load --tag nvidia-gpu-exporter-tools:local .
+      # Both go fix and the linter's analysis pass read only the files their
+      # build tags and target platform select, so each needs the two
+      # configurations that between them cover every tracked file: Linux with
+      # the GPU tag, and Windows. The GPU tag comes from the linter's own
+      # config. The formatters are not tag-filtered and need neither.
+      #
+      # embedlit is disabled because it corrupts code in Go 1.27.0: where an
+      # embedded type's opening brace shares a line with its first field it
+      # drops that field, sometimes leaving the file unparseable and sometimes
+      # leaving it compiling with a field silently gone, which is the dangerous
+      # case in a test fixture. Fixed upstream for 1.27.1 (golang/go#80993), so
+      # drop the flag once the toolchain moves.
+      - >-
+        {{.FMT}} sh -c 'go mod tidy && go fix -embedlit=false -tags gpu ./...
+        && GOOS=windows go fix -embedlit=false ./...'
+      # unfixable findings are reported by lint, not by fmt
+      - "{{.FMT}} golangci-lint run --fix --issues-exit-code 0 ./..."
+      - "{{.FMT}} sh -c 'GOOS=windows golangci-lint run --fix --issues-exit-code 0 ./...'"
+      - "{{.FMT}} golangci-lint fmt ./..."
+      # tracked files only: a bare find would also rewrite scratch directories
+      # and any other worktree checked out under this one
+      - git ls-files '*.sh' | xargs {{.FMT}} shfmt -w -i 2 -ci -sr
+    vars:
+      FMT: >-
+        docker run --rm -u "$(id -u):$(id -g)"
+        -e GOFLAGS=-mod=mod -e HOME=/tmp
+        -e GOCACHE=/tmp/go-build -e GOMODCACHE=/tmp/go-mod
+        -e GOLANGCI_LINT_CACHE=/tmp/golangci-lint
+        -v nvidia-gpu-exporter-fmt-cache:/tmp
+        -v "$PWD":/src -w /src nvidia-gpu-exporter-tools:local
 
   lint:
-    desc: lint everything (code, docs, scripts, dashboard, release config)
+    desc: lint everything (code, docs, scripts, dashboards, release config)
     cmds:
       - task: lint:go
       - task: lint:assets
       - task: lint:dashboard
-      - goreleaser check
+      - task: lint:release
 
   lint:go:
-    desc: lint go code and module tidiness (what CI covers via golangci)
+    desc: lint go code and module tidiness
     cmds:
-      - go mod tidy --diff
-      - golangci-lint run ./...
+      - task: stage
+        vars: {TARGET: lint-go-mod-tidy}
+      - task: stage
+        vars: {TARGET: lint-golangci-lint}
+      # the Windows service is invisible to a Linux analysis pass
+      - task: stage
+        vars: {TARGET: lint-golangci-lint-windows}
+      # never runs without a GPU, but it must keep compiling
+      - task: stage
+        vars: {TARGET: lint-gpu-tagged-test}
 
-  # runs in CI as its own step; lints tracked files only, so local scratch
-  # space and generated output stay out of scope, and dot-directories like
-  # .github are covered (filesystem globs would skip them)
   lint:assets:
     desc: lint markdown and shell scripts
     cmds:
-      - git ls-files '*.md' | xargs markdownlint
-      - git ls-files '*.sh' | xargs shellcheck
-      - git ls-files '*.sh' | xargs shfmt -d -i 2 -ci -sr
+      - task: stage
+        vars: {TARGET: lint-markdown}
+      - task: stage
+        vars: {TARGET: lint-shell}
 
-  # needs the dashboard-linter binary from the grafana/dashboard-linter
-  # releases page ("go install" does not work on it, the module carries
-  # replace directives). Rule exclusions live in docs/grafana/.lint.
   lint:dashboard:
     desc: lint the Grafana dashboards against grafana.com best practices
     cmds:
-      - dashboard-linter lint --strict docs/grafana/dashboard.json
-      - dashboard-linter lint --strict docs/grafana/dashboard-overview.json
+      - task: stage
+        vars: {TARGET: lint-dashboard}
+
+  lint:release:
+    desc: validate the release configuration
+    cmds:
+      - task: stage
+        vars: {TARGET: lint-goreleaser}
+
+  test:
+    desc: run the unit and integration tests
+    cmds:
+      - task: stage
+        vars: {TARGET: unit-tests}
+
+  # `task test` already replays every fuzz target's seed corpus, which is where
+  # the regression value sits. This drives the actual search instead, one target
+  # at a time because -fuzz only ever fuzzes one.
+  #
+  # It bind-mounts the working tree the way fmt does, rather than running as a
+  # stage: a discovered failure is written to testdata/fuzz/ and has to survive
+  # into the tree, which a stage that copies the sources cannot do. The cache
+  # volume also keeps the generated corpus between runs, so successive sessions
+  # build on each other's coverage instead of starting cold.
+  test:fuzz:
+    desc: 'search for new fuzz failures (FUZZTIME=30s per target)'
+    vars:
+      FUZZTIME: '{{.FUZZTIME | default "30s"}}'
+      FUZZ: >-
+        docker run --rm -u "$(id -u):$(id -g)"
+        -e GOFLAGS=-mod=mod -e HOME=/tmp
+        -e GOCACHE=/tmp/go-build -e GOMODCACHE=/tmp/go-mod
+        -v nvidia-gpu-exporter-fmt-cache:/tmp
+        -v "$PWD":/src -w /src nvidia-gpu-exporter-tools:local
+    cmds:
+      - >-
+        docker buildx build -f hack/dev.Dockerfile
+        --build-arg GO_VERSION="$(sed -n 's/^go //p' go.mod)"
+        --target fmt --load --tag nvidia-gpu-exporter-tools:local .
+      - |
+        set -eu
+        for pkg in $({{.FUZZ}} go list ./...); do
+          # a listing failure means the package does not compile, which has to
+          # surface rather than read as "no fuzz targets here"
+          listed="$({{.FUZZ}} go test -list 'Fuzz' "$pkg")"
+          for target in $(printf '%s\n' "$listed" | grep '^Fuzz' || true); do
+            echo "==> $pkg $target ({{.FUZZTIME}})"
+            {{.FUZZ}} go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime '{{.FUZZTIME}}'
+          done
+        done
+
+  # The dashboard images in the README are generated, not screen-captured by
+  # hand. Every run photographs live demo data, so the pictures differ each
+  # time even when nothing changed: refresh them when a dashboard changes, and
+  # read the image diff.
+  screenshots:
+    desc: regenerate the dashboard images in docs/grafana (needs the dev stack)
+    cmds:
+      - ./hack/compose/screenshots.sh
+
+  chart:docs:
+    desc: regenerate the chart README from the values.yaml comments
+    cmds:
+      # renovate: depName=jnorwood/helm-docs datasource=docker
+      - docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/helm-docs jnorwood/helm-docs:v1.14.2
+
+  # builds one check stage; every check goes through here so the build
+  # invocation exists in exactly one place
+  stage:
+    internal: true
+    cmds:
+      - >-
+        docker buildx build -f hack/dev.Dockerfile
+        --build-arg GO_VERSION="$(sed -n 's/^go //p' go.mod)"
+        --target {{.TARGET}} .
 
   release:
     desc: release
     vars:
       NEXT:
-        sh: svu next
+        # run from the primary checkout: a linked worktree's .git points at a
+        # common directory outside this mount
+        #
+        # the marker has to sit immediately above the version it pins, so it
+        # goes last rather than at the top of this comment block
+        # renovate: depName=caarlos0/svu datasource=docker
+        sh: docker run --rm -v "$PWD":/src -w /src caarlos0/svu:3.4.1 next
     cmds:
-      - git tag -a {{.NEXT}} -m "{{.NEXT}}"
+      # releases are cut from the tip of main, with a clean tree. Tags are
+      # fetched too, so the next version is computed against all of them.
+      - git fetch --tags --force origin main
+      - test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || { echo "HEAD is not the tip of origin/main" >&2; exit 1; }
+      - test -z "$(git status --porcelain)" || { echo "the working tree is not clean (staged or untracked files included)" >&2; exit 1; }
+      # prove that signing works and that GitHub verifies it, on a throwaway
+      # tag the release rules do not cover, before a version number is at
+      # stake: a v* tag that fails the check cannot be deleted without
+      # disabling the ruleset first
+      - |
+        t="sigcheck-$(date +%s)"
+        # removed again whatever happens below, so an aborted check leaves no tag behind
+        trap 'git push -q origin --delete "$t" >/dev/null 2>&1 || true; git tag -d "$t" >/dev/null 2>&1 || true' EXIT
+        git tag -s "$t" -m "$t"
+        git push -q origin "$t"
+        sha="$(gh api "repos/utkuozdemir/nvidia_gpu_exporter/git/ref/tags/$t" -q .object.sha)"
+        verified="$(gh api "repos/utkuozdemir/nvidia_gpu_exporter/git/tags/$sha" -q .verification.verified)"
+        test "$verified" = "true" || { echo "GitHub does not verify tags signed here. Is the signing key registered on the GitHub account as a signing key?" >&2; exit 1; }
+      # signed tag: the release workflow refuses a tag GitHub cannot verify,
+      # so this has to be -s. Release tags are immutable by ruleset, so a
+      # tag that fails there is fixed by disabling the ruleset briefly, not by
+      # force-pushing over it.
+      - git tag -s {{.NEXT}} -m "{{.NEXT}}"
       - echo {{.NEXT}}
       - git push origin {{.NEXT}}

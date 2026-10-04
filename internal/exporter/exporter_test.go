@@ -121,6 +121,89 @@ func TestBuildFQNameAndMultiplierMilliseconds(t *testing.T) {
 	assert.Equal(t, "prefix_power_smoothing_window_multiplier_seconds", fqName)
 }
 
+func TestBuildFQNameAndMultiplierSeconds(t *testing.T) {
+	t.Parallel()
+
+	// seen on driver 610.57: bbx.time_run [seconds]. the slogassert handler
+	// fails the test on any unasserted message, so this also pins that the
+	// explicit mapping produces no derivation error: the old fallback
+	// produced this same name, but with a noisy log on every startup
+	handler := slogassert.New(t, slog.LevelError, nil)
+
+	fqName, multiplier := exporter.BuildFQNameAndMultiplier(
+		"prefix",
+		"bbx.time_run [seconds]",
+		slog.New(handler),
+	)
+
+	assertFloat(t, 1, multiplier)
+	assert.Equal(t, "prefix_bbx_time_run_seconds", fqName)
+}
+
+func TestBuildFQNameAndMultiplierWattsPerSecond(t *testing.T) {
+	t.Parallel()
+
+	// seen on driver 610.57: power_smoothing.curr_profile.ramp_down_rate
+	// [W/s]. the slogassert handler fails the test on any unasserted
+	// message, so this also pins that the mapping produces no derivation
+	// error
+	handler := slogassert.New(t, slog.LevelError, nil)
+
+	fqName, multiplier := exporter.BuildFQNameAndMultiplier(
+		"prefix",
+		"power_smoothing.curr_profile.ramp_down_rate [W/s]",
+		slog.New(handler),
+	)
+
+	assertFloat(t, 1, multiplier)
+	assert.Equal(t, "prefix_power_smoothing_curr_profile_ramp_down_rate_watts_per_second", fqName)
+}
+
+func TestBuildFQNameAndMultiplierUnknownUnitSanitized(t *testing.T) {
+	t.Parallel()
+
+	// a made-up future unit: the name must come out stable and legal no
+	// matter what characters the unit carries, and the logged name must be
+	// the name that is actually exposed. the mangled spelling is the
+	// fallback of last resort, not an endorsement: a real unit that shows
+	// up is expected to get an explicit mapping like [W/s] did
+	handler := slogassert.New(t, slog.LevelError, nil)
+
+	fqName, multiplier := exporter.BuildFQNameAndMultiplier(
+		"prefix",
+		"some.future_field [MiB/s]",
+		slog.New(handler),
+	)
+
+	assertFloat(t, 1, multiplier)
+	assert.Equal(t, "prefix_some_future_field__mi_b_s", fqName)
+	handler.AssertPrecise(slogassert.LogMessageMatch{
+		Message: "returned field contains unexpected characters, it is parsed it with best effort, " +
+			"but it might get renamed in the future. please report it in the project's issue tracker",
+		Level:         slog.LevelError,
+		Attrs:         map[string]any{"parsed_name": "some_future_field__mi_b_s"},
+		AllAttrsMatch: false,
+	})
+}
+
+func TestBuildFQNameAndMultiplierDoubleUnderscorePreserved(t *testing.T) {
+	t.Parallel()
+
+	// a legal double underscore in a returned field name must survive: it
+	// ships as-is today on drivers the corpus does not record, so collapsing
+	// it would rename an established series
+	handler := slogassert.New(t, slog.LevelError, nil)
+
+	fqName, multiplier := exporter.BuildFQNameAndMultiplier(
+		"prefix",
+		"foo__bar",
+		slog.New(handler),
+	)
+
+	assertFloat(t, 1, multiplier)
+	assert.Equal(t, "prefix_foo__bar", fqName)
+}
+
 func TestBuildFQNameAndMultiplierNoPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -164,6 +247,7 @@ func TestBuildQFieldToMetricInfoMap(t *testing.T) {
 	qFieldToMetricInfoMap := exporter.BuildQFieldToMetricInfoMap(
 		"prefix",
 		map[nvidiasmi.QField]nvidiasmi.RField{"aaa": "AAA", "bbb": "BBB"},
+		nil,
 		logger,
 	)
 
@@ -208,7 +292,7 @@ func newTestExporter(
 
 	source := collect.NewLive(query, 0, nil, logger)
 
-	return exporter.New(ctx, prefix, resolved, source, false, logger)
+	return exporter.New(ctx, prefix, resolved, source, exporter.Features{}, nil, exporter.ExecExitCodeMetric, logger)
 }
 
 // staticSource serves a fixed snapshot, for driving the render paths directly.
@@ -231,7 +315,39 @@ func newAppsExporter(t *testing.T, snapshot collect.Snapshot) *exporter.GPUExpor
 		t.Context(), "bbb", "fan.speed", "", 0, nvidiasmi.DefaultRunFunc, logger)
 	require.NoError(t, err)
 
-	return exporter.New(t.Context(), "aaa", resolved, &staticSource{snapshot: snapshot}, true, logger)
+	return exporter.New(
+		t.Context(),
+		"aaa",
+		resolved,
+		&staticSource{snapshot: snapshot},
+		exporter.Features{ComputeApps: true},
+		nil,
+		exporter.ExecExitCodeMetric,
+		logger,
+	)
+}
+
+// newExtrasExporter wires an exporter with the given features to a fixed
+// snapshot, for driving the extras render paths directly.
+func newExtrasExporter(t *testing.T, features exporter.Features, snapshot collect.Snapshot) *exporter.GPUExporter {
+	t.Helper()
+
+	logger := slogt.New(t)
+
+	resolved, err := nvidiasmi.ResolveFields(
+		t.Context(), "bbb", "fan.speed", "", 0, nvidiasmi.DefaultRunFunc, logger)
+	require.NoError(t, err)
+
+	return exporter.New(
+		t.Context(),
+		"aaa",
+		resolved,
+		&staticSource{snapshot: snapshot},
+		features,
+		nil,
+		exporter.ExecExitCodeMetric,
+		logger,
+	)
 }
 
 // gpuTable builds a minimal one-GPU table carrying just the uuid cell.
@@ -443,11 +559,13 @@ func TestCollectDeliversMetricsOnFatalError(t *testing.T) {
 	}
 
 	source := collect.NewLive(query, 0, func(fatalErr error) { cancel(fatalErr) }, logger)
-	exp := exporter.New(ctx, "aaa", resolved, source, false, logger)
+	exp := exporter.New(ctx, "aaa", resolved, source, exporter.Features{}, nil, exporter.ExecExitCodeMetric, logger)
 
 	families := gatherFamilies(t, exp)
 
-	// the context is cancelled by now, and the metrics still made it out
+	// the metrics made it out, and shutdown-on-error follows: the callback
+	// fires after the outcome is published, so wait for it
+	<-ctx.Done()
 	require.Error(t, context.Cause(ctx))
 
 	failed, ok := families["aaa_failed_scrapes_total"]
@@ -544,7 +662,16 @@ func TestCollectComputeAppsDisabled(t *testing.T) {
 	// the feature is off
 	apps := []nvidiasmi.ComputeApp{{GPUUUID: "abc", PID: "42", ProcessName: "x", UsedMemory: "1 MiB"}}
 	source := &staticSource{snapshot: appsSnapshot(gpuTable("GPU-ABC"), apps, true)}
-	exp := exporter.New(t.Context(), "aaa", resolved, source, false, logger)
+	exp := exporter.New(
+		t.Context(),
+		"aaa",
+		resolved,
+		source,
+		exporter.Features{},
+		nil,
+		exporter.ExecExitCodeMetric,
+		logger,
+	)
 
 	families := gatherFamilies(t, exp)
 
@@ -552,4 +679,302 @@ func TestCollectComputeAppsDisabled(t *testing.T) {
 	assert.NotContains(t, families, "aaa_compute_apps")
 	assert.NotContains(t, families, "aaa_compute_app_info")
 	assert.NotContains(t, families, "aaa_compute_app_used_memory_bytes")
+}
+
+// extrasSnapshot builds a successful snapshot carrying the given extras.
+func extrasSnapshot(table *nvidiasmi.Table, extras collect.Extras) collect.Snapshot {
+	return collect.Snapshot{
+		Attempted:   true,
+		Success:     true,
+		Table:       table,
+		Extras:      extras,
+		LastSuccess: time.Now(),
+	}
+}
+
+// labelValue reads one label's value off a rendered metric.
+func labelValue(t *testing.T, metric *dto.Metric, name string) string {
+	t.Helper()
+
+	for _, label := range metric.GetLabel() {
+		if label.GetName() == name {
+			return label.GetValue()
+		}
+	}
+
+	t.Fatalf("label %s not found", name)
+
+	return ""
+}
+
+func TestExtrasRendered(t *testing.T) {
+	t.Parallel()
+
+	extras := collect.Extras{
+		CUDAVersion: "13.1",
+		PCIe: []collect.PCIeThroughput{
+			{UUID: "abc", TXBytesPerSecond: 123000, RXBytesPerSecond: 456000},
+		},
+		Energy: []collect.EnergyCounter{{UUID: "abc", Joules: 12345.678}},
+	}
+
+	features := exporter.Features{PCIeThroughput: true, Energy: true}
+	exp := newExtrasExporter(t, features, extrasSnapshot(gpuTable("GPU-ABC"), extras))
+
+	families := gatherFamilies(t, exp)
+
+	tx, ok := families["aaa_pcie_throughput_tx_bytes_per_second"]
+	require.True(t, ok)
+	assertFloat(t, 123000, tx.GetMetric()[0].GetGauge().GetValue())
+	assert.Equal(t, "abc", labelValue(t, tx.GetMetric()[0], "uuid"))
+
+	rx, ok := families["aaa_pcie_throughput_rx_bytes_per_second"]
+	require.True(t, ok)
+	assertFloat(t, 456000, rx.GetMetric()[0].GetGauge().GetValue())
+
+	energy, ok := families["aaa_energy_joules_total"]
+	require.True(t, ok)
+	assert.Equal(t, dto.MetricType_COUNTER, energy.GetType())
+	assertFloat(t, 12345.678, energy.GetMetric()[0].GetCounter().GetValue())
+	assert.Equal(t, "abc", labelValue(t, energy.GetMetric()[0], "uuid"))
+
+	info, ok := families["aaa_gpu_info"]
+	require.True(t, ok)
+	assert.Equal(t, "13.1", labelValue(t, info.GetMetric()[0], "cuda_version"))
+}
+
+func TestExtrasSuppressedWhenFeaturesOff(t *testing.T) {
+	t.Parallel()
+
+	// even a snapshot carrying extras data produces none of the gated
+	// families when the features are off
+	extras := collect.Extras{
+		CUDAVersion: "13.1",
+		PCIe:        []collect.PCIeThroughput{{UUID: "abc", TXBytesPerSecond: 1, RXBytesPerSecond: 2}},
+		Energy:      []collect.EnergyCounter{{UUID: "abc", Joules: 3}},
+	}
+
+	exp := newExtrasExporter(t, exporter.Features{}, extrasSnapshot(gpuTable("GPU-ABC"), extras))
+
+	families := gatherFamilies(t, exp)
+
+	assert.NotContains(t, families, "aaa_pcie_throughput_tx_bytes_per_second")
+	assert.NotContains(t, families, "aaa_pcie_throughput_rx_bytes_per_second")
+	assert.NotContains(t, families, "aaa_energy_joules_total")
+
+	// the cuda_version label is not feature-gated: it rides gpu_info in both
+	// backends
+	info, ok := families["aaa_gpu_info"]
+	require.True(t, ok)
+	assert.Equal(t, "13.1", labelValue(t, info.GetMetric()[0], "cuda_version"))
+}
+
+func TestCudaVersionLabelEmptyWhenUnknown(t *testing.T) {
+	t.Parallel()
+
+	exp := newExtrasExporter(t, exporter.Features{}, extrasSnapshot(gpuTable("GPU-ABC"), collect.Extras{}))
+
+	families := gatherFamilies(t, exp)
+
+	info, ok := families["aaa_gpu_info"]
+	require.True(t, ok)
+	assert.Empty(t, labelValue(t, info.GetMetric()[0], "cuda_version"))
+}
+
+func migExtras() collect.Extras {
+	util := func(v float64) *float64 { return &v }
+
+	shared := &collect.MIGUtilization{
+		GraphicsActivityRatio: util(0.5),
+		SMActivityRatio:       util(0.9),
+		// SMOccupancy deliberately nil: a per-metric gap must render nothing
+		TensorActivityRatio:  util(0.1),
+		PCIeTXBytesPerSecond: util(1048576),
+		PCIeRXBytesPerSecond: util(2097152),
+	}
+
+	return collect.Extras{
+		MIG: []collect.MIGInstance{
+			{
+				ParentUUID: "abc", UUID: "mig-a", GPUInstanceID: "1", ComputeInstanceID: "0",
+				Profile: "1g.10gb",
+				Memory:  &collect.MIGMemory{Total: 1000, Used: 100, Free: 900, Reserved: 50},
+				// two compute instances of the same GPU instance share the
+				// utilization values
+				Utilization: shared,
+			},
+			{
+				ParentUUID: "abc", UUID: "mig-b", GPUInstanceID: "1", ComputeInstanceID: "1",
+				Profile: "1g.10gb",
+				// same GPU instance: the framebuffer is shared, the values
+				// repeat (as on real hardware)
+				Memory:      &collect.MIGMemory{Total: 1000, Used: 100, Free: 900, Reserved: 50},
+				Utilization: shared,
+			},
+			{
+				ParentUUID: "abc", UUID: "mig-c", GPUInstanceID: "2", ComputeInstanceID: "0",
+				Profile: "2g.20gb",
+				// memory and utilization unreadable: only the info series
+			},
+		},
+	}
+}
+
+func TestMIGExtrasRendered(t *testing.T) {
+	t.Parallel()
+
+	exp := newExtrasExporter(t, exporter.Features{MIG: true}, extrasSnapshot(gpuTable("GPU-ABC"), migExtras()))
+
+	families := gatherFamilies(t, exp)
+
+	info, ok := families["aaa_mig_info"]
+	require.True(t, ok)
+	require.Len(t, info.GetMetric(), 3)
+
+	first := info.GetMetric()[0]
+	assert.Equal(t, "abc", labelValue(t, first, "uuid"))
+	assert.Equal(t, "mig-a", labelValue(t, first, "mig_uuid"))
+	assert.Equal(t, "1", labelValue(t, first, "gpu_instance_id"))
+	assert.Equal(t, "0", labelValue(t, first, "compute_instance_id"))
+	assert.Equal(t, "1g.10gb", labelValue(t, first, "profile"))
+
+	memUsed, ok := families["aaa_mig_memory_used_bytes"]
+	require.True(t, ok)
+	require.Len(t, memUsed.GetMetric(), 1,
+		"memory is per GPU instance: one series for the two-slice instance, none for the unreadable one")
+	assert.Equal(t, "1", labelValue(t, memUsed.GetMetric()[0], "gpu_instance_id"))
+	assertFloat(t, 100, memUsed.GetMetric()[0].GetGauge().GetValue())
+
+	smActivity, ok := families["aaa_mig_sm_activity_ratio"]
+	require.True(t, ok)
+	require.Len(t, smActivity.GetMetric(), 1,
+		"one GPU instance hosting two compute instances must emit its utilization once")
+	assert.Equal(t, "1", labelValue(t, smActivity.GetMetric()[0], "gpu_instance_id"))
+	assertFloat(t, 0.9, smActivity.GetMetric()[0].GetGauge().GetValue())
+
+	_, ok = families["aaa_mig_sm_occupancy_ratio"]
+	assert.False(t, ok, "a nil per-metric value must render nothing")
+
+	pcieTx, ok := families["aaa_mig_pcie_throughput_tx_bytes_per_second"]
+	require.True(t, ok)
+	assertFloat(t, 1048576, pcieTx.GetMetric()[0].GetGauge().GetValue())
+}
+
+func TestMIGSuppressedWhenOff(t *testing.T) {
+	t.Parallel()
+
+	exp := newExtrasExporter(t, exporter.Features{}, extrasSnapshot(gpuTable("GPU-ABC"), migExtras()))
+
+	families := gatherFamilies(t, exp)
+
+	for family := range families {
+		assert.NotContains(t, family, "mig_", "MIG families must not render when the feature is off")
+	}
+}
+
+func TestComputeAppMIGLabels(t *testing.T) {
+	t.Parallel()
+
+	apps := []nvidiasmi.ComputeApp{{
+		GPUUUID: "abc", PID: "42", ProcessName: "python",
+		UsedMemory: "1 MiB", GPUInstanceID: "3", ComputeInstanceID: "0",
+	}}
+
+	snapshot := appsSnapshot(gpuTable("GPU-ABC"), apps, true)
+
+	withLabels := newExtrasExporter(t,
+		exporter.Features{ComputeApps: true, ComputeAppMIGLabels: true}, snapshot)
+	families := gatherFamilies(t, withLabels)
+
+	info, ok := families["aaa_compute_app_info"]
+	require.True(t, ok)
+	assert.Equal(t, "3", labelValue(t, info.GetMetric()[0], "gpu_instance_id"))
+	assert.Equal(t, "0", labelValue(t, info.GetMetric()[0], "compute_instance_id"))
+
+	// without the opt-in, the label set stays the shipped 3-label one
+	withoutLabels := newExtrasExporter(t, exporter.Features{ComputeApps: true}, snapshot)
+	families = gatherFamilies(t, withoutLabels)
+
+	info, ok = families["aaa_compute_app_info"]
+	require.True(t, ok)
+	require.Len(t, info.GetMetric()[0].GetLabel(), 3)
+}
+
+// staticXIDs is a canned XIDSource.
+type staticXIDs struct {
+	counters []collect.XIDCounter
+}
+
+func (s *staticXIDs) XIDCounts() []collect.XIDCounter { return s.counters }
+
+func TestXIDsRenderEvenWhenCollectionFails(t *testing.T) {
+	t.Parallel()
+
+	logger := slogt.New(t)
+
+	resolved, err := nvidiasmi.ResolveFields(
+		t.Context(), "bbb", "fan.speed", "", 0, nvidiasmi.DefaultRunFunc, logger)
+	require.NoError(t, err)
+
+	xids := &staticXIDs{counters: []collect.XIDCounter{
+		{UUID: "abc", XID: 79, Count: 3, LastSeen: time.Unix(1700000000, 0)},
+	}}
+
+	// a failed collection: no table at all, which is exactly when the XID
+	// counters must stay visible
+	failed := collect.Snapshot{Attempted: true, Success: false, Failures: 1}
+
+	exp := exporter.New(
+		t.Context(),
+		"aaa",
+		resolved,
+		&staticSource{snapshot: failed},
+		exporter.Features{XIDEvents: true},
+		xids,
+		exporter.ExecExitCodeMetric,
+		logger,
+	)
+
+	families := gatherFamilies(t, exp)
+
+	counts, ok := families["aaa_xid_errors_total"]
+	require.True(t, ok, "xid counters must render without a table")
+	assert.Equal(t, dto.MetricType_COUNTER, counts.GetType())
+	assertFloat(t, 3, counts.GetMetric()[0].GetCounter().GetValue())
+	assert.Equal(t, "abc", labelValue(t, counts.GetMetric()[0], "uuid"))
+	assert.Equal(t, "79", labelValue(t, counts.GetMetric()[0], "xid"))
+
+	stamps, ok := families["aaa_xid_last_timestamp_seconds"]
+	require.True(t, ok)
+	assertFloat(t, 1700000000, stamps.GetMetric()[0].GetGauge().GetValue())
+}
+
+func TestXIDsSuppressedWhenOff(t *testing.T) {
+	t.Parallel()
+
+	logger := slogt.New(t)
+
+	resolved, err := nvidiasmi.ResolveFields(
+		t.Context(), "bbb", "fan.speed", "", 0, nvidiasmi.DefaultRunFunc, logger)
+	require.NoError(t, err)
+
+	// a live, populated source: the feature gate alone must suppress the
+	// families
+	xids := &staticXIDs{counters: []collect.XIDCounter{{UUID: "abc", XID: 79, Count: 3}}}
+
+	exp := exporter.New(
+		t.Context(),
+		"aaa",
+		resolved,
+		&staticSource{snapshot: extrasSnapshot(gpuTable("GPU-ABC"), collect.Extras{})},
+		exporter.Features{},
+		xids,
+		exporter.ExecExitCodeMetric,
+		logger,
+	)
+
+	families := gatherFamilies(t, exp)
+
+	assert.NotContains(t, families, "aaa_xid_errors_total")
+	assert.NotContains(t, families, "aaa_xid_last_timestamp_seconds")
 }

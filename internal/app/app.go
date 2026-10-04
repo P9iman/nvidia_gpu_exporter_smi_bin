@@ -11,7 +11,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"path"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/coreos/go-systemd/v22/activation"
@@ -27,34 +31,28 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/utkuozdemir/nvidia_gpu_exporter/internal/collect"
+	"github.com/utkuozdemir/nvidia_gpu_exporter/internal/demo"
+	"github.com/utkuozdemir/nvidia_gpu_exporter/internal/demodata"
 	"github.com/utkuozdemir/nvidia_gpu_exporter/internal/exporter"
+	"github.com/utkuozdemir/nvidia_gpu_exporter/internal/fakesmi"
 	"github.com/utkuozdemir/nvidia_gpu_exporter/internal/nvidiasmi"
+	"github.com/utkuozdemir/nvidia_gpu_exporter/internal/nvmlnative"
 )
 
 const appName = "nvidia_gpu_exporter"
 
-const redirectPageTemplate = `<html lang="en">
-<head><title>Nvidia GPU Exporter</title></head>
-<body>
-<h1>Nvidia GPU Exporter</h1>
-<p><a href="%s">Metrics</a></p>%s
-</body>
-</html>
-`
+// scrapeTimeoutHeader is set by Prometheus on every scrape to advertise the
+// timeout it applies to it.
+const scrapeTimeoutHeader = "X-Prometheus-Scrape-Timeout-Seconds"
 
-const pprofLinksHTML = `
-<h2>Profiling</h2>
-<ul>
-<li><a href="/debug/pprof/">Index</a></li>
-<li><a href="/debug/pprof/goroutine">Goroutines</a></li>
-<li><a href="/debug/pprof/heap">Heap</a></li>
-<li><a href="/debug/pprof/threadcreate">Threads</a></li>
-<li><a href="/debug/pprof/block">Block</a></li>
-<li><a href="/debug/pprof/mutex">Mutex</a></li>
-<li><a href="/debug/pprof/profile">CPU Profile</a></li>
-<li><a href="/debug/pprof/trace">Trace</a></li>
-</ul>
-`
+// maxScrapeTimeoutSeconds caps the advertised scrape timeout the exporter
+// honors. Values beyond it are nonsensical (and would overflow the duration
+// conversion), so they are treated like a missing header.
+const maxScrapeTimeoutSeconds = 24 * 60 * 60
+
+// xidWatcherExitGrace is how long shutdown waits for the XID watcher's
+// bounded driver call to return before abandoning the goroutine.
+const xidWatcherExitGrace = 3 * time.Second
 
 // Options carries what the callers inject into a run beyond the command-line
 // arguments.
@@ -79,7 +77,7 @@ type Options struct {
 // Run wires up the exporter from the given command-line arguments and serves
 // metrics until ctx is cancelled.
 //
-//nolint:funlen
+//nolint:funlen,cyclop
 func Run(ctx context.Context, args []string, opts Options) error {
 	app := kingpin.New(appName, "")
 
@@ -106,6 +104,17 @@ func Run(ctx context.Context, args []string, opts Options) error {
 			Default("60s").Duration()
 		metricsPath = app.Flag("web.telemetry-path", "Path under which to expose metrics.").
 				Default("/metrics").String()
+		maxRequests = app.Flag("web.max-requests",
+			"Maximum number of concurrent scrapes of the metrics endpoint. Requests beyond "+
+				"the limit are answered with a 503 immediately instead of queueing up behind "+
+				"a slow collection. 0 disables the limit.").
+			Default("40").Int()
+		timeoutOffset = app.Flag("web.timeout-offset",
+			"Offset subtracted from the scrape timeout Prometheus advertises in the "+
+				scrapeTimeoutHeader+" header, leaving time for the response to reach "+
+				"Prometheus. The advertised timeout minus this offset bounds each scrape's "+
+				"collection, on top of --collect.timeout.").
+			Default("500ms").Duration()
 		nvidiaSmiCommand = app.Flag("nvidia-smi-command",
 			"Path or command to be used for the nvidia-smi executable. "+
 				"Multiple words run the first as the executable with the rest as its arguments "+
@@ -124,22 +133,51 @@ func Run(ctx context.Context, args []string, opts Options) error {
 				"(for example `remapped_rows.histogram.*`). Useful to drop fields that are slow "+
 				"or unsupported on a given setup.").
 			Default("").String()
+		collectBackend = app.Flag("collect.backend",
+			"How to collect GPU metrics. `exec` runs nvidia-smi (the default); `nvml` is "+
+				"experimental and reads the driver library (libnvidia-ml) directly, without "+
+				"nvidia-smi. The nvml backend requires Linux and a build with the backend "+
+				"compiled in. It exposes every metric the exec backend exposes, plus "+
+				"NVML-only extras (see the docs). `demo` serves synthetic data mimicking "+
+				"the nvml surface, with no GPU or driver needed, on any platform.").
+			Default(DefaultBackend).Enum("exec", "nvml", "demo")
 		collectInterval = app.Flag("collect.interval",
-			"Interval at which nvidia-smi runs in the background, with scrapes serving the most "+
-				"recent result. When 0, nvidia-smi runs synchronously on each scrape instead.").
+			"Interval at which the collection runs in the background, with scrapes serving "+
+				"the most recent result. When 0, the collection runs synchronously on each "+
+				"scrape instead.").
 			Default("0").Duration()
 		collectTimeout = app.Flag("collect.timeout",
-			"Maximum duration a single collection cycle may take, including all nvidia-smi runs "+
-				"within it and the runs at startup. 0 disables the bound.").
+			"Maximum duration a single collection cycle may take, including all the work "+
+				"within it (e.g. the nvidia-smi runs) and the runs at startup. 0 disables "+
+				"the bound.").
 			Default("10s").Duration()
 		collectComputeApps = app.Flag("collect.compute-apps",
-			"Also export per-process GPU metrics from `nvidia-smi --query-compute-apps`. "+
-				"Adds one nvidia-smi run per collection cycle. When the exporter runs in a "+
+			"Also export per-process GPU metrics (from `nvidia-smi --query-compute-apps`, "+
+				"or the equivalent NVML calls in nvml mode). When the exporter runs in a "+
 				"container, seeing other workloads' processes requires sharing the host PID "+
 				"namespace (hostPID in Kubernetes, --pid=host in Docker).").
 			Default("false").Bool()
+		demoConfig = app.Flag("demo-config",
+			"Path to the demo backend's config file (the fake-nvidia-smi YAML plus an "+
+				"extras block; see the docs). Only with --collect.backend=demo; the "+
+				"built-in demo setup is used when unset.").
+			Default("").String()
+		collectComputeAppsMIG = app.Flag("collect.compute-apps-mig",
+			"Add MIG attribution labels (gpu_instance_id, compute_instance_id) to the "+
+				"per-process metrics (requires --collect.compute-apps and the nvml or demo "+
+				"backend). Opt-in because it changes the label set of the "+
+				"per-process series.").
+			Default("false").Bool()
+		collectPcieThroughput = app.Flag("collect.pcie-throughput",
+			"Also export the PCIe TX/RX throughput per GPU (requires --collect.backend=nvml; "+
+				"the demo backend serves the family regardless). "+
+				"Each direction is sampled over a separate 20ms driver counter window, adding "+
+				"roughly 40ms per GPU to every collection cycle (~320ms on an 8-GPU node); "+
+				"pairing it with --collect.interval keeps scrapes unaffected.").
+			Default("false").Bool()
 		shutdownOnErr = app.Flag("shutdown-on-error",
-			"Shut down the exporter if there is an error querying nvidia-smi. "+
+			"Shut down the exporter if there is a fatal collection error "+
+				"(a failing nvidia-smi run, or a lost GPU/driver in nvml mode). "+
 				"When false, exporter will simply log this error and export it as a metric, but will not crash.").
 			Default("false").Bool()
 		enablePprof = app.Flag("web.enable-pprof",
@@ -168,6 +206,23 @@ func Run(ctx context.Context, args []string, opts Options) error {
 		return err
 	}
 
+	if err := validateWebFlags(*metricsPath, *maxRequests, *timeoutOffset); err != nil {
+		return err
+	}
+
+	backendFlags := backendFlagSet{
+		backend:          *collectBackend,
+		nvidiaSmiCommand: *nvidiaSmiCommand,
+		pcieThroughput:   *collectPcieThroughput,
+		computeApps:      *collectComputeApps,
+		computeAppsMIG:   *collectComputeAppsMIG,
+		demoConfig:       *demoConfig,
+	}
+
+	if err := validateBackendFlags(backendFlags); err != nil {
+		return err
+	}
+
 	ctx, serverCancel := context.WithCancelCause(ctx)
 	defer serverCancel(nil)
 
@@ -179,23 +234,35 @@ func Run(ctx context.Context, args []string, opts Options) error {
 	eg, ctx := errgroup.WithContext(ctx)
 
 	collectCfg := collectConfig{
+		backend:          *collectBackend,
 		nvidiaSmiCommand: *nvidiaSmiCommand,
 		qFieldsRaw:       *qFields,
 		qFieldsExclude:   *qFieldsExclude,
 		interval:         *collectInterval,
 		timeout:          *collectTimeout,
 		computeApps:      *collectComputeApps,
+		computeAppsMIG:   *collectComputeAppsMIG,
+		pcieThroughput:   *collectPcieThroughput,
+		demoConfig:       *demoConfig,
 		onFatal:          onFatal,
 	}
 
 	registry := prometheus.NewRegistry()
 
-	err := setupExporter(ctx, eg, collectCfg, registry, logger)
+	exp, err := setupExporter(ctx, eg, collectCfg, registry, logger)
 	if err != nil {
 		return err
 	}
 
-	mux := newServeMux(logger, *metricsPath, *enablePprof, registry)
+	mux, err := newServeMux(serveMuxConfig{
+		metricsPath:   *metricsPath,
+		enablePprof:   *enablePprof,
+		maxRequests:   *maxRequests,
+		timeoutOffset: *timeoutOffset,
+	}, registry, exp, logger)
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		ReadHeaderTimeout: *readHeaderTimeout,
@@ -203,6 +270,10 @@ func Run(ctx context.Context, args []string, opts Options) error {
 		WriteTimeout:      *writeTimeout,
 		IdleTimeout:       *idleTimeout,
 		Handler:           mux,
+		// request contexts descend from the process context, so shutdown also
+		// cancels the collections running inside in-flight scrapes instead of
+		// waiting out the shutdown grace period behind them
+		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
 	serveHTTP(ctx, eg, srv, webConfig, *network, opts.OnListen, logger)
@@ -259,6 +330,51 @@ func serveHTTP(
 	})
 }
 
+// backendFlagSet carries the flags whose combinations depend on the chosen
+// backend.
+type backendFlagSet struct {
+	backend          string
+	nvidiaSmiCommand string
+	pcieThroughput   bool
+	computeApps      bool
+	computeAppsMIG   bool
+	demoConfig       string
+}
+
+// validateBackendFlags rejects flag combinations the chosen backend cannot
+// honor, as errors rather than silent ignores.
+//
+//nolint:cyclop // a flat rule list, one branch per combination
+func validateBackendFlags(flags backendFlagSet) error {
+	if flags.backend != backendExec && flags.nvidiaSmiCommand != nvidiasmi.DefaultCommand {
+		// a custom command signals intent (ssh wrappers, sudo) only the
+		// exec backend can honor
+		return fmt.Errorf("--nvidia-smi-command cannot be combined with --collect.backend=%s", flags.backend)
+	}
+
+	if flags.backend == backendExec && flags.pcieThroughput {
+		// the throughput counters only exist in the driver library (the
+		// demo backend serves the family regardless and accepts the flag
+		// as a no-op)
+		return errors.New("--collect.pcie-throughput requires --collect.backend=nvml")
+	}
+
+	if flags.computeAppsMIG && flags.backend == backendExec {
+		// the per-process query output has no MIG attribution to parse
+		return errors.New("--collect.compute-apps-mig requires --collect.backend=nvml or demo")
+	}
+
+	if flags.computeAppsMIG && !flags.computeApps {
+		return errors.New("--collect.compute-apps-mig requires --collect.compute-apps")
+	}
+
+	if flags.demoConfig != "" && flags.backend != backendDemo {
+		return errors.New("--demo-config requires --collect.backend=demo")
+	}
+
+	return nil
+}
+
 // validateCollectFlags rejects the flag values kingpin's types cannot.
 func validateCollectFlags(interval, timeout time.Duration) error {
 	if interval < 0 {
@@ -272,43 +388,123 @@ func validateCollectFlags(interval, timeout time.Duration) error {
 	return nil
 }
 
+// validateWebFlags rejects the web flag values kingpin's types cannot.
+func validateWebFlags(metricsPath string, maxRequests int, timeoutOffset time.Duration) error {
+	if err := validateMetricsPath(metricsPath); err != nil {
+		return err
+	}
+
+	if maxRequests < 0 {
+		return fmt.Errorf("web.max-requests must not be negative, got %d", maxRequests)
+	}
+
+	if timeoutOffset < 0 {
+		return fmt.Errorf("web.timeout-offset must not be negative, got %s", timeoutOffset)
+	}
+
+	return nil
+}
+
+// reservedPaths are the routes the exporter owns, which the telemetry path
+// must not collide with. A trailing slash reserves the whole subtree, no
+// trailing slash reserves exactly that path. The pprof subtree is reserved
+// even in runs that do not enable pprof, so enabling it later cannot turn a
+// working configuration into a startup failure.
+var reservedPaths = []string{"/-/healthy", "/-/ready", "/debug/pprof/"}
+
+// validateMetricsPath rejects telemetry path values that would collide with
+// the exporter's own routes or make the route registration panic at startup.
+func validateMetricsPath(metricsPath string) error {
+	if err := validateMetricsPathShape(metricsPath); err != nil {
+		return err
+	}
+
+	for _, reserved := range reservedPaths {
+		subtree := strings.HasSuffix(reserved, "/")
+		if metricsPath == strings.TrimSuffix(reserved, "/") || (subtree && strings.HasPrefix(metricsPath, reserved)) {
+			return fmt.Errorf("web.telemetry-path %q collides with the exporter's own routes", metricsPath)
+		}
+	}
+
+	return nil
+}
+
+// validateMetricsPathShape rejects malformed telemetry path values. Escapes
+// and mux pattern syntax are rejected wholesale rather than interpreted: the
+// mux unescapes and parses patterns, so a value like "/-/%68ealthy" or
+// "/x{y}" is either a disguised collision or a route that can never be
+// matched the way it reads.
+func validateMetricsPathShape(metricsPath string) error {
+	switch {
+	case !strings.HasPrefix(metricsPath, "/"):
+		return fmt.Errorf("web.telemetry-path must start with a slash, got %q", metricsPath)
+	case metricsPath == "/":
+		return errors.New(`web.telemetry-path must not be "/", it would collide with the landing page`)
+	case strings.HasSuffix(metricsPath, "/"):
+		return fmt.Errorf("web.telemetry-path must not end with a slash, got %q", metricsPath)
+	case path.Clean(metricsPath) != metricsPath:
+		return fmt.Errorf("web.telemetry-path must be a clean path without empty or relative segments, got %q",
+			metricsPath)
+	case strings.ContainsAny(metricsPath, "{}%?#"):
+		return fmt.Errorf("web.telemetry-path must not contain the characters {}%%?#, got %q", metricsPath)
+	case strings.ContainsFunc(metricsPath, unicode.IsSpace):
+		return fmt.Errorf("web.telemetry-path must not contain whitespace, got %q", metricsPath)
+	default:
+		return nil
+	}
+}
+
+// demoCommand is the placeholder executable name the demo backend's
+// in-process runner receives; it is never looked up on PATH (the runner
+// answers the prepared command without starting it).
+const demoCommand = "demo-nvidia-smi"
+
+// Collection backend names, the values of --collect.backend.
+const (
+	backendExec = "exec"
+	backendNVML = "nvml"
+	backendDemo = "demo"
+)
+
+// DefaultBackend is the default value of --collect.backend. The regular
+// builds default to exec; the nvml release flavor overrides this to nvml at
+// build time, so the artifact whose whole point is the nvml backend uses it
+// out of the box (the flag still switches either build both ways).
+var DefaultBackend = backendExec
+
 // collectConfig carries the collection-related settings from the flags to the
 // exporter setup.
 type collectConfig struct {
+	backend          string
 	nvidiaSmiCommand string
 	qFieldsRaw       string
 	qFieldsExclude   string
 	interval         time.Duration
 	timeout          time.Duration
 	computeApps      bool
+	computeAppsMIG   bool
+	pcieThroughput   bool
+	demoConfig       string
 	onFatal          func(error)
 }
 
 // setupExporter resolves the query fields, builds the collection source
 // (adding the background collector to the errgroup when an interval is set),
-// and registers the exporter on the given registry, along with the collectors
-// the default registry would carry.
+// and builds the exporter. The exporter itself is returned instead of
+// registered: the metrics handler collects it under each scrape's own
+// context, so it lives in a per-scrape registry there. The given registry
+// gets the collectors whose output is scrape-independent.
 func setupExporter(
 	ctx context.Context,
 	eg *errgroup.Group,
 	cfg collectConfig,
 	registry *prometheus.Registry,
 	logger *slog.Logger,
-) error {
-	resolved, err := nvidiasmi.ResolveFields(
-		ctx,
-		cfg.nvidiaSmiCommand,
-		cfg.qFieldsRaw,
-		cfg.qFieldsExclude,
-		cfg.timeout,
-		nvidiasmi.DefaultRunFunc,
-		logger,
-	)
+) (*exporter.GPUExporter, error) {
+	resolved, query, xids, exitCodeMetric, err := setupBackend(ctx, eg, cfg, logger)
 	if err != nil {
-		return fmt.Errorf("failed to resolve query fields: %w", err)
+		return nil, err
 	}
-
-	query := buildQueryFunc(cfg, resolved, logger)
 
 	var src collect.Source
 
@@ -323,22 +519,205 @@ func setupExporter(
 		src = collect.NewLive(query, cfg.timeout, cfg.onFatal, logger)
 	}
 
-	exp := exporter.New(ctx, exporter.DefaultPrefix, resolved, src, cfg.computeApps, logger)
+	extrasCapable := cfg.backend == backendNVML || cfg.backend == backendDemo
+
+	features := exporter.Features{
+		ComputeApps:         cfg.computeApps,
+		ComputeAppMIGLabels: cfg.computeAppsMIG,
+		// the extras families exist in the nvml backend and its demo twin;
+		// the demo serves the PCIe family unconditionally
+		PCIeThroughput: cfg.pcieThroughput || cfg.backend == backendDemo,
+		Energy:         extrasCapable,
+		MIG:            extrasCapable,
+		XIDEvents:      extrasCapable,
+	}
+
+	exp := exporter.New(ctx, exporter.DefaultPrefix, resolved, src, features, xids, exitCodeMetric, logger)
 
 	// the go and process collectors keep the exposed families identical to
 	// what the default registry used to serve
 	for _, collector := range []prometheus.Collector{
-		exp,
 		clientversion.NewCollector(appName),
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
 		if err = registry.Register(collector); err != nil {
-			return fmt.Errorf("failed to register collector: %w", err)
+			return nil, fmt.Errorf("failed to register collector: %w", err)
 		}
 	}
 
-	return nil
+	return exp, nil
+}
+
+// setupBackend resolves the query fields and builds the collection function
+// for the configured backend. The exec backend resolves fields by asking
+// nvidia-smi; the nvml backend resolves against its compiled catalog and
+// reports collection status as an NVML return code under its own metric
+// name.
+//
+//nolint:ireturn // the exec backend has no XID source, a nil interface is the point
+func setupBackend(
+	ctx context.Context,
+	eg *errgroup.Group,
+	cfg collectConfig,
+	logger *slog.Logger,
+) (nvidiasmi.ResolvedFields, collect.QueryFunc, exporter.XIDSource, exporter.ExitCodeMetric, error) {
+	if cfg.backend == backendNVML {
+		return setupNVMLBackend(ctx, eg, cfg, logger)
+	}
+
+	if cfg.backend == backendDemo {
+		return setupDemoBackend(ctx, cfg, logger)
+	}
+
+	resolved, err := nvidiasmi.ResolveFields(
+		ctx,
+		cfg.nvidiaSmiCommand,
+		cfg.qFieldsRaw,
+		cfg.qFieldsExclude,
+		cfg.timeout,
+		nvidiasmi.DefaultRunFunc,
+		logger,
+	)
+	if err != nil {
+		return nvidiasmi.ResolvedFields{}, nil, nil, exporter.ExitCodeMetric{},
+			fmt.Errorf("failed to resolve query fields: %w", err)
+	}
+
+	// the CUDA version is not a query field and is effectively constant for
+	// the process lifetime (it changes with the driver, which requires the
+	// GPUs to be idle), so it is read once at startup, never per scrape
+	cudaVersion := nvidiasmi.QueryCudaVersion(
+		ctx, cfg.nvidiaSmiCommand, cfg.timeout, nvidiasmi.DefaultRunFunc, logger)
+
+	query := buildQueryFunc(cfg, resolved, cudaVersion, nvidiasmi.DefaultRunFunc, logger)
+
+	return resolved, query, nil, exporter.ExecExitCodeMetric, nil
+}
+
+// setupNVMLBackend wires the nvml flavor: field resolution against the
+// compiled catalog, driver shutdown tied to the application lifetime, and the
+// XID watcher running beside the collection cycles.
+//
+//nolint:ireturn // the backend implements the XID source interface
+func setupNVMLBackend(
+	ctx context.Context,
+	eg *errgroup.Group,
+	cfg collectConfig,
+	logger *slog.Logger,
+) (nvidiasmi.ResolvedFields, collect.QueryFunc, exporter.XIDSource, exporter.ExitCodeMetric, error) {
+	backend, err := nvmlnative.New(logger)
+	if err != nil {
+		return nvidiasmi.ResolvedFields{}, nil, nil, exporter.ExitCodeMetric{},
+			fmt.Errorf("failed to set up the nvml backend: %w", err)
+	}
+
+	resolved, err := nvmlnative.Resolve(
+		cfg.qFieldsRaw, cfg.qFieldsExclude, backend.DriverVersion(), logger)
+	if err != nil {
+		backend.Close()
+
+		return nvidiasmi.ResolvedFields{}, nil, nil, exporter.ExitCodeMetric{},
+			fmt.Errorf("failed to resolve query fields: %w", err)
+	}
+
+	// tie NVML shutdown to the application lifetime, best-effort: a
+	// collection stuck inside the driver makes Close skip the shutdown
+	// call rather than delay process exit
+	eg.Go(func() error {
+		<-ctx.Done()
+
+		backend.Close()
+
+		return nil
+	})
+
+	superviseXIDWatcher(ctx, eg, backend, logger)
+
+	opts := nvmlnative.CollectOptions{
+		ComputeApps:    cfg.computeApps,
+		PCIeThroughput: cfg.pcieThroughput,
+		Energy:         true,
+		MIG:            true,
+	}
+
+	return resolved, backend.QueryFunc(resolved, opts), backend, exporter.NVMLReturnCodeMetric, nil
+}
+
+// setupDemoBackend wires the demo flavor: the exec pipeline running against
+// the in-process fake, wrapped so every cycle works from one immutable
+// configuration snapshot and carries the synthesized extras families. The
+// served surface mimics the nvml flavor.
+//
+//nolint:ireturn // the exec backend has no XID source, a nil interface is the point
+func setupDemoBackend(
+	ctx context.Context,
+	cfg collectConfig,
+	logger *slog.Logger,
+) (nvidiasmi.ResolvedFields, collect.QueryFunc, exporter.XIDSource, exporter.ExitCodeMetric, error) {
+	logger.Warn("demo mode: serving synthetic data, not a real GPU")
+
+	source := fakesmi.CaptureSource{FS: demodata.FS, Default: demodata.Default}
+
+	backend, err := demo.New(source, cfg.demoConfig, logger)
+	if err != nil {
+		return nvidiasmi.ResolvedFields{}, nil, nil, exporter.ExitCodeMetric{},
+			fmt.Errorf("failed to set up the demo backend: %w", err)
+	}
+
+	runFunc := backend.RunFunc()
+
+	resolved, err := nvidiasmi.ResolveFields(
+		ctx, demoCommand, cfg.qFieldsRaw, cfg.qFieldsExclude, cfg.timeout, runFunc, logger)
+	if err != nil {
+		return nvidiasmi.ResolvedFields{}, nil, nil, exporter.ExitCodeMetric{},
+			fmt.Errorf("failed to resolve query fields: %w", err)
+	}
+
+	cudaVersion := nvidiasmi.QueryCudaVersion(ctx, demoCommand, cfg.timeout, runFunc, logger)
+
+	demoCfg := cfg
+	demoCfg.nvidiaSmiCommand = demoCommand
+
+	query := backend.WrapQueryFunc(buildQueryFunc(demoCfg, resolved, cudaVersion, runFunc, logger))
+
+	return resolved, query, backend, exporter.NVMLReturnCodeMetric, nil
+}
+
+// superviseXIDWatcher runs the XID watcher beside the collection cycles for
+// the whole application lifetime; it returns nil on shutdown and never fails
+// the group. The watcher is supervised rather than joined directly: a driver
+// call that ignores its own bound must not hang process exit, which is the
+// ultimate cleanup (same rule as the shutdown handling).
+func superviseXIDWatcher(
+	ctx context.Context,
+	eg *errgroup.Group,
+	backend *nvmlnative.Backend,
+	logger *slog.Logger,
+) {
+	eg.Go(func() error {
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+
+			_ = backend.RunXIDWatcher(ctx)
+		}()
+
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+		}
+
+		select {
+		case <-done:
+		case <-time.After(xidWatcherExitGrace):
+			logger.Warn("abandoning the XID watcher: stuck inside the driver")
+		}
+
+		return nil
+	})
 }
 
 // buildQueryFunc builds the collection cycle: the GPU query, plus the
@@ -348,22 +727,25 @@ func setupExporter(
 func buildQueryFunc(
 	cfg collectConfig,
 	resolved nvidiasmi.ResolvedFields,
+	cudaVersion string,
+	runFunc nvidiasmi.RunFunc,
 	logger *slog.Logger,
 ) collect.QueryFunc {
 	return func(queryCtx context.Context) (collect.Reading, int, error) {
 		table, exitCode, err := nvidiasmi.Query(
-			queryCtx, cfg.nvidiaSmiCommand, resolved.Query, nvidiasmi.DefaultRunFunc)
+			queryCtx, cfg.nvidiaSmiCommand, resolved.Query, runFunc)
 		if err != nil {
 			return collect.Reading{}, exitCode, fmt.Errorf("failed to query gpus: %w", err)
 		}
 
 		reading := collect.Reading{Table: table}
+		reading.Extras.CUDAVersion = cudaVersion
 
 		if cfg.computeApps {
 			reading.AppsAttempted = true
 
 			apps, appsErr := nvidiasmi.QueryComputeApps(
-				queryCtx, cfg.nvidiaSmiCommand, nvidiasmi.DefaultRunFunc, logger)
+				queryCtx, cfg.nvidiaSmiCommand, runFunc, logger)
 			if appsErr != nil {
 				reading.AppsErr = appsErr
 			} else {
@@ -376,51 +758,167 @@ func buildQueryFunc(
 	}
 }
 
-type RootHandler struct {
-	response []byte
-	logger   *slog.Logger
+// serveMuxConfig carries the web flags into the mux construction.
+type serveMuxConfig struct {
+	metricsPath   string
+	enablePprof   bool
+	maxRequests   int
+	timeoutOffset time.Duration
 }
 
-func NewRootHandler(logger *slog.Logger, metricsPath string, enablePprof bool) *RootHandler {
-	pprofLinks := ""
-	if enablePprof {
-		pprofLinks = pprofLinksHTML
-	}
-
-	return &RootHandler{
-		response: fmt.Appendf(nil, redirectPageTemplate, metricsPath, pprofLinks),
-		logger:   logger,
-	}
-}
-
-func (r *RootHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	if _, err := w.Write(r.response); err != nil {
-		r.logger.Error("failed to write redirect", "err", err)
-	}
-}
-
-// newServeMux builds the HTTP mux serving the root page, metrics and
-// optionally pprof. The metrics handler is instrumented the same way the
-// default promhttp handler is, so the promhttp_* families stay exposed.
+// newServeMux builds the HTTP mux: the landing page on exactly the root path
+// (anything unknown is a 404), the metrics endpoint, the health endpoints and
+// optionally pprof.
 func newServeMux(
-	logger *slog.Logger,
-	metricsPath string,
-	enablePprof bool,
+	cfg serveMuxConfig,
 	registry *prometheus.Registry,
-) *http.ServeMux {
+	exp *exporter.GPUExporter,
+	logger *slog.Logger,
+) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
-	rootHandler := NewRootHandler(logger, metricsPath, enablePprof)
-	mux.Handle("GET /", rootHandler)
-	mux.Handle("GET "+metricsPath,
-		promhttp.InstrumentMetricHandler(registry, promhttp.HandlerFor(registry, promhttp.HandlerOpts{})))
+	landingPage, err := web.NewLandingPage(web.LandingConfig{
+		Name:        "Nvidia GPU Exporter",
+		Description: "Prometheus exporter for Nvidia GPUs, using nvidia-smi.",
+		Version:     version.Info(),
+		Links: []web.LandingLinks{
+			{Address: cfg.metricsPath, Text: "Metrics"},
+		},
+		Profiling: strconv.FormatBool(cfg.enablePprof),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the landing page: %w", err)
+	}
 
-	if enablePprof {
+	mux.Handle("GET /{$}", landingPage)
+	mux.Handle("GET "+cfg.metricsPath, newMetricsHandler(cfg, registry, exp, logger))
+
+	// process-level health checks: reachable means healthy. Deliberately
+	// independent of collection success, a host whose nvidia-smi is failing
+	// must stay scrapeable so the health metrics can report the failure.
+	mux.HandleFunc("GET /-/healthy", healthHandler("Healthy"))
+	mux.HandleFunc("GET /-/ready", healthHandler("Ready"))
+
+	if cfg.enablePprof {
 		logger.Info("pprof endpoints enabled")
 		registerPprof(mux)
 	}
 
-	return mux
+	return mux, nil
+}
+
+// newMetricsHandler builds the metrics endpoint. Each scrape gathers the
+// exporter under the scrape's own context through a per-scrape registry,
+// since the collector interface has no context of its own; the collectors
+// whose output is scrape-independent live in the shared registry, which also
+// carries the promhttp instrumentation and error counter so the handler's
+// own health stays visible in the output.
+func newMetricsHandler(
+	cfg serveMuxConfig,
+	registry *prometheus.Registry,
+	exp *exporter.GPUExporter,
+	logger *slog.Logger,
+) http.Handler {
+	opts := promhttp.HandlerOpts{
+		ErrorLog:      promhttpLogger{logger: logger},
+		ErrorHandling: promhttp.HTTPErrorOnError,
+		Registry:      registry,
+	}
+
+	// the scrape context is derived from the request context, the linter just
+	// cannot see it through the helper
+	//nolint:contextcheck
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		ctx, cancel := scrapeContext(req, cfg.timeoutOffset)
+		defer cancel()
+
+		scrapeRegistry := prometheus.NewRegistry()
+		if err := scrapeRegistry.Register(exp.WithContext(ctx)); err != nil {
+			logger.Error("failed to register the exporter for a scrape", "err", err)
+			http.Error(writer, "failed to register the exporter", http.StatusInternalServerError)
+
+			return
+		}
+
+		// the scrape deadline travels through the context-scoped collector;
+		// stamping it onto the request as well is defensive (promhttp does
+		// not currently read the request context)
+		promhttp.HandlerFor(prometheus.Gatherers{registry, scrapeRegistry}, opts).
+			ServeHTTP(writer, req.WithContext(ctx))
+	})
+
+	return promhttp.InstrumentMetricHandler(registry, limitConcurrency(handler, cfg.maxRequests, logger))
+}
+
+// scrapeContext bounds a scrape by the timeout Prometheus advertises for it,
+// minus the configured offset, on top of the request's own lifetime (which
+// already ends on client disconnect). A missing, malformed or too-small
+// advertised value adds no deadline, leaving the collection timeout as the
+// only bound, so a bad header can never make things stricter than no header.
+func scrapeContext(req *http.Request, offset time.Duration) (context.Context, context.CancelFunc) {
+	raw := req.Header.Get(scrapeTimeoutHeader)
+	if raw == "" {
+		return req.Context(), func() {}
+	}
+
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil || !(seconds > 0) || seconds > maxScrapeTimeoutSeconds {
+		return req.Context(), func() {}
+	}
+
+	timeout := time.Duration(seconds*float64(time.Second)) - offset
+	if timeout <= 0 {
+		return req.Context(), func() {}
+	}
+
+	return context.WithTimeout(req.Context(), timeout)
+}
+
+// limitConcurrency bounds the number of scrapes served at once, so overload
+// (scrapes piling up behind a slow or wedged collection) turns into immediate
+// 503s instead of an unbounded queue of goroutines and connections.
+func limitConcurrency(next http.Handler, limit int, logger *slog.Logger) http.Handler {
+	if limit <= 0 {
+		return next
+	}
+
+	slots := make(chan struct{}, limit)
+
+	return http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+
+			next.ServeHTTP(writer, req)
+		default:
+			logger.Warn("refused a scrape: concurrent request limit reached", "limit", limit)
+			http.Error(writer, fmt.Sprintf("limit of %d concurrent requests reached, try again later", limit),
+				http.StatusServiceUnavailable)
+		}
+	})
+}
+
+// healthHandler answers a health endpoint. The check is process-level: being
+// served at all is what it reports.
+func healthHandler(status string) http.HandlerFunc {
+	body := []byte("Nvidia GPU Exporter is " + status + ".\n")
+
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+		_, _ = w.Write(body)
+	}
+}
+
+// promhttpLogger adapts the exporter's logger to the promhttp error log
+// interface, so errors gathering or encoding the metrics land in the
+// exporter's own logs instead of vanishing.
+type promhttpLogger struct {
+	logger *slog.Logger
+}
+
+func (l promhttpLogger) Println(v ...any) {
+	l.logger.Error(strings.TrimSuffix(fmt.Sprintln(v...), "\n"))
 }
 
 // registerPprof wires up the net/http/pprof handlers on the given mux.

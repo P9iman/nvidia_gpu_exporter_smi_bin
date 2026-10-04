@@ -30,7 +30,7 @@ port: 9835
 # -- The path to expose the metrics from
 telemetryPath: /metrics
 
-# -- The command to run to get `nvidia-smi` compatible output. Can be a custom path and/or args.
+# -- The command to run to get `nvidia-smi` compatible output. Can be a custom path and/or args. Note the official image contains only the exporter binary (no shell or ssh), so a wrapper command needs a custom image.
 nvidiaSmiCommand: nvidia-smi
 
 # -- `nvidia-smi` fields to be queried by the exporter. `AUTO` auto-detects them.
@@ -54,10 +54,27 @@ log:
   # -- Log format: logfmt, json
   format: logfmt
 
+# -- Liveness probe for the exporter container. The default checks that the
+# process serves HTTP at all; it deliberately does not depend on collection
+# success, so a failing nvidia-smi keeps the pod scrapeable and the failure
+# visible in the metrics. Set to `null` to disable the probe.
+livenessProbe:
+  httpGet:
+    path: /-/healthy
+    port: http
+
+# -- Readiness probe for the exporter container, process-level like the
+# liveness probe. Set to `null` to disable the probe.
+readinessProbe:
+  httpGet:
+    path: /-/ready
+    port: http
+
 # -- Extra command line arguments for the exporter, e.g. `--collect.interval=30s`
 extraArgs: []
 
-# -- Use the host network for the pods
+# -- Use the host network for the pods. Also switches their DNS policy to
+# `ClusterFirstWithHostNet` so that cluster DNS keeps working.
 hostNetwork: false
 
 # -- Share the host PID namespace with the pods. Required for computeApps to
@@ -74,6 +91,8 @@ hostPort:
 service:
   # -- Create a Service for the exporter
   enabled: true
+  # -- Annotations to add to the Service
+  annotations: {}
   # -- Service type
   type: ClusterIP
   # -- Service port
@@ -88,6 +107,11 @@ serviceAccount:
   annotations: {}
   # -- The name of the service account to use. If not set and create is true, a name is generated.
   name: ""
+
+# -- Mount the service account token into the pods. The exporter never talks
+# to the Kubernetes API, so it is off by default. Enable it only if something
+# injected into the pods (e.g. a service mesh sidecar) needs the token.
+automountServiceAccountToken: false
 
 serviceMonitor:
   # -- Create a Prometheus Operator ServiceMonitor (requires the Prometheus Operator CRDs)
@@ -148,6 +172,82 @@ prometheusRule:
     thresholdSeconds: 300
     # -- Severity label of the alert
     severity: warning
+  collectionSlow:
+    # -- Alert when collecting GPU metrics is slow for 10 minutes. Healthy
+    # nvidia-smi answers well under a second with the persistence daemon
+    # running; sustained slowness often precedes a wedged driver.
+    enabled: true
+    # -- Collection duration in seconds above which the alert fires
+    thresholdSeconds: 5
+  recoveryAction:
+    # -- Alert when the driver itself requests a GPU recovery action (reset,
+    # reboot, drain). The most direct health signal there is; needs a recent
+    # driver (570+), silently absent on older ones.
+    enabled: true
+  xidCritical:
+    # -- Alert on Xid errors whose NVIDIA-recommended action is a GPU reset
+    # or node reboot. Needs the NVML backend; never fires on the default
+    # nvidia-smi backend.
+    enabled: true
+    # -- Xid codes treated as critical (reset/reboot class)
+    codes: [48, 62, 64, 74, 79, 95, 119, 120]
+  xidWarning:
+    # -- Alert on Xid errors whose recommended action is an application
+    # restart. Explicit allowlist: application-caused Xids (13, 31, 43, ...)
+    # and informational ones (63, 92) deliberately never alert.
+    enabled: true
+    # -- Xid codes treated as warning (restart-app class)
+    codes: [94]
+  uncorrectableEcc:
+    # -- Alert when a GPU reports uncorrectable ECC memory errors since its
+    # last reset. Data may have been corrupted; a GPU reset repairs the
+    # memory on Ampere and newer. Corrected (single-bit) errors never alert.
+    enabled: true
+  rowRemapFailure:
+    # -- Alert when GPU memory row remapping failed, which is NVIDIA's
+    # stated RMA criterion
+    enabled: true
+  rowRemapPending:
+    # -- Alert when a GPU memory row remap waits for a GPU reset to take
+    # effect
+    enabled: true
+  retiredPagesPending:
+    # -- Alert when a GPU memory page retirement waits for a reboot to take
+    # effect (pre-Ampere GPUs)
+    enabled: true
+  thermalSlowdown:
+    # -- Alert when hardware thermal protection throttles a GPU for 5
+    # minutes: cooling is failing at the hardware trip point. The driver
+    # applies the right per-model threshold, so this works across GPU
+    # generations. Disable if it fires routinely on thermally-limited
+    # mobile/small-form-factor systems.
+    enabled: true
+  swThermalSlowdown:
+    # -- Alert when the driver throttles a GPU at its temperature target for
+    # 30 minutes. Off by default: this is normal on thermally-limited
+    # consumer and laptop systems under sustained load.
+    enabled: false
+  powerBrake:
+    # -- Alert when an external hardware power brake throttles a GPU for 5
+    # minutes: a power delivery problem (PSU, cables, rack power). The
+    # configured software power limit never raises this.
+    enabled: true
+  temperatureHigh:
+    # -- Alert when the GPU core temperature stays above the threshold for
+    # 10 minutes. Off by default: safe temperatures differ per GPU
+    # generation (a datacenter A100 throttles around 83C while laptop GPUs
+    # sit at 87C by design), so tune the threshold to your fleet before
+    # enabling.
+    enabled: false
+    # -- Core temperature in Celsius above which the alert fires
+    thresholdCelsius: 85
+  gpuMissing:
+    # -- Alert when a machine reports fewer GPUs than its recent maximum
+    # while collection stays healthy, which catches GPUs that silently fall
+    # off the bus on the default backend. Off by default: it also fires for
+    # up to 6 hours after deliberately removing a GPU and needs a stable
+    # instance label across exporter restarts.
+    enabled: false
 
 grafanaDashboard:
   # -- Create a ConfigMap with the Grafana dashboards (single-GPU detail and
@@ -163,12 +263,24 @@ grafanaDashboard:
 # -- Annotations to add to the pods
 podAnnotations: {}
 
-# -- Security context for the pods
-podSecurityContext: {}
+# -- Extra labels to add to the pods
+podLabels: {}
 
-# -- Security context for the exporter container. The default is unprivileged:
-# GPU access comes from the NVIDIA runtime, which requires no privileges.
-securityContext: {}
+# -- Security context for the pods. The defaults pass `restricted` Pod Security
+# Standard admission. `runAsUser` is unset on purpose: the image's own uid
+# applies, and an OpenShift SCC can still assign one.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Security context for the exporter container. Unprivileged: GPU access
+# comes from the NVIDIA runtime, which needs no privileges or capabilities.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
 
 # -- Resources for the exporter container
 resources: {}
@@ -179,10 +291,19 @@ volumes: []
 # -- Extra volume mounts for the exporter container
 volumeMounts: []
 
-# -- Node selector for the pods, e.g. to restrict the DaemonSet to GPU nodes
-nodeSelector: {}
+# -- Node selector for the pods. The images are Linux-only, hence the default.
+# Add a GPU node label to keep the DaemonSet off non-GPU nodes, e.g.
+# `nvidia.com/gpu.present: "true"` on clusters with GPU Feature Discovery
+# (see the README section on scheduling). Helm merges maps key by key, so
+# overriding with `{}` does not clear the default; set the whole value to
+# `null` to remove it.
+nodeSelector:
+  kubernetes.io/os: linux
 
-# -- Tolerations for the pods
+# -- Tolerations for the pods. GPU node pools are often tainted (e.g.
+# `nvidia.com/gpu=present:NoSchedule`) so that only GPU workloads land on
+# them. This chart deliberately requests no GPU resource, so add a matching
+# toleration here or the exporter will not schedule on those nodes.
 tolerations: []
 
 # -- Affinity for the pods
@@ -191,8 +312,29 @@ affinity: {}
 # -- Priority class name for the pods
 priorityClassName: ""
 
-# -- Image pull secrets
+# -- Update strategy of the DaemonSet. Raise `rollingUpdate.maxUnavailable`
+# (absolute or percentage) to roll out faster on large clusters, or use
+# `type: OnDelete` for manually staged rollouts.
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+# -- How many old DaemonSet history revisions to retain for rollbacks.
+# Empty means the Kubernetes default (10).
+revisionHistoryLimit: ""
+
+# -- Image pull secrets, used by both the exporter and the `helm test` pods
 imagePullSecrets: []
+
+test:
+  image:
+    # -- Image repository for the `helm test` connection-check pod
+    repository: docker.io/library/busybox
+    # -- Image tag for the `helm test` pod
+    tag: "1.38"
+    # -- Image pull policy for the `helm test` pod
+    pullPolicy: IfNotPresent
 
 # -- Override the chart name
 nameOverride: ""

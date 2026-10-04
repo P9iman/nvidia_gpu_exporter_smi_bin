@@ -28,6 +28,9 @@ type Snapshot struct {
 	// AppsSuccess reports whether that per-process query succeeded, valid only
 	// when AppsAttempted.
 	AppsSuccess bool
+	// Extras holds the backend-specific readings of the most recent
+	// collection, zero when the latest collection failed.
+	Extras Extras
 	// ExitCode is the exit code of the most recent attempt, valid only when Attempted.
 	ExitCode int
 	// Duration is how long the most recent attempt took, valid only when Attempted.
@@ -62,6 +65,9 @@ type Reading struct {
 	AppsSuccess bool
 	// AppsErr is the per-process query's error, for source-owned logging only.
 	AppsErr error
+	// Extras holds the backend-specific readings outside the query-field
+	// schema. Like Apps, extras fail softly and never fail the collection.
+	Extras Extras
 }
 
 // QueryFunc runs one collection cycle: the nvidia-smi GPU query, plus the
@@ -70,21 +76,50 @@ type Reading struct {
 // error and exit code describe the GPU query only, per the Reading contract.
 type QueryFunc func(ctx context.Context) (Reading, int, error)
 
-// collectOnce runs one collection bounded by timeout and folds the outcome
-// into a Snapshot, updating the cumulative failure count and last-success
-// time owned by the caller. A failed attempt is logged here, exactly once,
-// so failures are neither logged per scrape nor lost. The onFatal callback
-// implements shutdown-on-error: it fires only on a genuine non-zero exit of
-// the command, not on a timeout the collector caused itself.
+// FatalError marks a collection failure that should trigger
+// shutdown-on-error. The exec backend signals fatality through
+// *exec.ExitError (a genuine non-zero exit of the command); backends without
+// a subprocess wrap their fatal-class failures (driver/GPU lifecycle errors,
+// never per-field unavailability) in this type instead.
+type FatalError struct {
+	Err error
+}
+
+func (e *FatalError) Error() string {
+	if e == nil || e.Err == nil {
+		return "fatal collection error"
+	}
+
+	return e.Err.Error()
+}
+
+func (e *FatalError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+
+	return e.Err
+}
+
+// collectOnce runs one collection bounded by timeout and returns the outcome
+// as a Snapshot with the cumulative fields (Failures, LastSuccess) not yet
+// folded in: that is the caller's job, via foldCumulative, under whatever
+// synchronization owns those counters. A failed attempt is logged here,
+// exactly once, so failures are neither logged per scrape nor lost.
+//
+// The second return value is the error to hand to the shutdown-on-error
+// callback, or nil: a genuine non-zero exit of the command or a lifecycle
+// error, never a timeout the collector caused itself. It is returned rather
+// than reported from here on purpose: the caller must publish the outcome
+// first and notify afterwards, because the callback cancels the process
+// context, and a scrape that sees that cancellation before the publication
+// would serve no data for the very collection that failed.
 func collectOnce(
 	ctx context.Context,
 	query QueryFunc,
 	timeout time.Duration,
-	onFatal func(error),
 	logger *slog.Logger,
-	failures *uint64,
-	lastOK *time.Time,
-) Snapshot {
+) (Snapshot, error) {
 	callCtx, cancel := withOptionalTimeout(ctx, timeout)
 	defer cancel()
 
@@ -100,21 +135,17 @@ func collectOnce(
 	}
 
 	if err != nil {
-		*failures++
-
 		logger.Error("failed to collect metrics", "err", err)
 
-		snapshot.Success = false
-		snapshot.Table = nil
-		snapshot.LastSuccess = *lastOK
-		snapshot.Failures = *failures
-
 		var exitErr *exec.ExitError
-		if callCtx.Err() == nil && errors.As(err, &exitErr) && onFatal != nil {
-			onFatal(err)
+
+		var fatalErr *FatalError
+
+		if callCtx.Err() == nil && (errors.As(err, &exitErr) || errors.As(err, &fatalErr)) {
+			return snapshot, err
 		}
 
-		return snapshot
+		return snapshot, nil
 	}
 
 	// The per-process query fails softly: it is logged here (once per attempt,
@@ -124,17 +155,29 @@ func collectOnce(
 		logger.Warn("failed to collect per-process data", "err", reading.AppsErr)
 	}
 
-	*lastOK = now
-
 	snapshot.Success = true
 	snapshot.Table = reading.Table
 	snapshot.Apps = reading.Apps
 	snapshot.AppsAttempted = reading.AppsAttempted
 	snapshot.AppsSuccess = reading.AppsSuccess
+	snapshot.Extras = reading.Extras
 	snapshot.LastSuccess = now
-	snapshot.Failures = *failures
 
-	return snapshot
+	return snapshot, nil
+}
+
+// foldCumulative merges one collection outcome into the cumulative failure
+// count and last-success time, and stamps the updated values onto the
+// snapshot. The caller owns the synchronization of the two counters.
+func foldCumulative(snapshot *Snapshot, failures *uint64, lastOK *time.Time) {
+	if snapshot.Success {
+		*lastOK = snapshot.LastSuccess
+	} else {
+		*failures++
+	}
+
+	snapshot.Failures = *failures
+	snapshot.LastSuccess = *lastOK
 }
 
 // withOptionalTimeout bounds ctx by d, where a zero d means no bound. A plain

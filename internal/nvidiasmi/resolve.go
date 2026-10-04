@@ -60,12 +60,7 @@ func ResolveFields(
 ) (ResolvedFields, error) {
 	qFieldsSeparated := strings.Split(qFieldsRaw, ",")
 
-	qFields := toQFieldSlice(qFieldsSeparated)
-	for _, infoField := range infoFields {
-		qFields = append(qFields, infoField.QField)
-	}
-
-	qFields = removeDuplicates(qFields)
+	qFields := withRequiredFields(toQFieldSlice(qFieldsSeparated))
 
 	auto := len(qFieldsSeparated) == 1 && qFieldsSeparated[0] == qFieldsAuto
 	if auto {
@@ -80,7 +75,12 @@ func ResolveFields(
 			return builtinResolvedFields(qFieldsExcludeRaw, logger), nil
 		}
 
-		qFields = parsed
+		// The discovered list goes through the same normalization as an
+		// explicit one. A field listed twice would otherwise be queried twice
+		// and emit two samples for one series, failing the whole scrape, and a
+		// list missing an identity field would leave the gpu_info labels it
+		// claims empty.
+		qFields = withRequiredFields(parsed)
 	}
 
 	qFields = filterExcludedQFields(qFields, qFieldsExcludeRaw, logger)
@@ -225,6 +225,19 @@ func withOptionalTimeout(ctx context.Context, d time.Duration) (context.Context,
 	return context.WithTimeout(ctx, d)
 }
 
+// withRequiredFields appends the identity fields backing the gpu_info metric
+// and drops duplicates, keeping first-seen order. Every field list, explicit or
+// discovered, passes through here: the query assigns cells positionally, so a
+// duplicate is two cells for one metric, and a missing identity field is a
+// gpu_info label with nothing behind it.
+func withRequiredFields(qFields []QField) []QField {
+	for _, infoField := range infoFields {
+		qFields = append(qFields, infoField.QField)
+	}
+
+	return removeDuplicates(qFields)
+}
+
 func removeDuplicates[T comparable](fields []T) []T {
 	valMap := make(map[T]struct{})
 
@@ -239,4 +252,49 @@ func removeDuplicates[T comparable](fields []T) []T {
 	}
 
 	return uniques
+}
+
+// ResolveFromCatalog resolves fields against a backend-provided catalog
+// instead of querying nvidia-smi. AUTO selects the full catalog in the given
+// order; an explicit field list fails on fields the catalog does not know, so
+// it is never silently narrowed. Exclusions and the fixed identity fields
+// behave exactly as in ResolveFields.
+func ResolveFromCatalog(
+	order []QField,
+	catalog map[QField]RField,
+	qFieldsRaw string,
+	qFieldsExcludeRaw string,
+	logger *slog.Logger,
+) (ResolvedFields, error) {
+	qFieldsSeparated := strings.Split(qFieldsRaw, ",")
+	auto := len(qFieldsSeparated) == 1 && qFieldsSeparated[0] == qFieldsAuto
+
+	var qFields []QField
+
+	if auto {
+		// the catalog is compiled in and known to be duplicate-free and to
+		// carry the identity fields, unlike a discovered list
+		qFields = slices.Clone(order)
+	} else {
+		qFields = withRequiredFields(toQFieldSlice(qFieldsSeparated))
+	}
+
+	qFields = filterExcludedQFields(qFields, qFieldsExcludeRaw, logger)
+
+	returned := make(map[QField]RField, len(qFields))
+
+	for _, qField := range qFields {
+		rField, ok := catalog[qField]
+		if !ok {
+			return ResolvedFields{}, fmt.Errorf("query field %q is not supported by this backend", qField)
+		}
+
+		returned[qField] = rField
+	}
+
+	return ResolvedFields{
+		Query:    qFields,
+		Returned: returned,
+		Info:     slices.Clone(infoFields),
+	}, nil
 }

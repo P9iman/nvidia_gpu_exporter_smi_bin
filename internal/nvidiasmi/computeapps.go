@@ -36,6 +36,13 @@ type ComputeApp struct {
 	// because it is not always a number: "[N/A]" on Windows WDDM,
 	// "[Insufficient Permissions]" in restricted containers.
 	UsedMemory string
+	// GPUInstanceID and ComputeInstanceID attribute the process to a MIG
+	// instance. The nvml backend fills them for processes on
+	// MIG-partitioned GPUs, and the demo backend for its configured
+	// topology; they stay empty otherwise (this query's fixed field set
+	// predates MIG and is never extended, per the comment above).
+	GPUInstanceID     string
+	ComputeInstanceID string
 }
 
 // QueryComputeApps runs nvidia-smi --query-compute-apps and parses the CSV
@@ -121,10 +128,21 @@ func parseComputeAppRow(line string, logger *slog.Logger) (ComputeApp, bool) {
 		return ComputeApp{}, false
 	}
 
+	// The uuid is what joins the per-process series to their GPU. Without one
+	// the row cannot be attributed, and several such rows would collapse onto
+	// one label set and fail the whole scrape as duplicates.
+	uuid := NormalizeUUID(fields[0])
+	if uuid == "" {
+		logger.Warn("skipping compute apps row with no gpu uuid",
+			"pid", pid, "row", strings.TrimSpace(line))
+
+		return ComputeApp{}, false
+	}
+
 	name := strings.TrimSpace(strings.Join(fields[2:len(fields)-1], ","))
 
 	return ComputeApp{
-		GPUUUID:     NormalizeUUID(fields[0]),
+		GPUUUID:     uuid,
 		PID:         pid,
 		ProcessName: name,
 		UsedMemory:  strings.TrimSpace(fields[len(fields)-1]),

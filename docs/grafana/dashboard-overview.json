@@ -50,6 +50,7 @@
   "description": "Compare all GPUs of one node side by side: current state, utilization, thermals, throttling and health per GPU. Companion to the Nvidia GPU Metrics dashboard (single-GPU detail, click a GPU in the table to drill down). Shows physical GPUs as reported by nvidia-smi, MIG instances are not broken out: rows are the parent GPUs, whose utilization is not reported in MIG mode and shows n/a. Based on the prometheus metrics from github.com/utkuozdemir/nvidia_gpu_exporter",
   "editable": false,
   "fiscalYearStartMonth": 0,
+  "gnetId": 25547,
   "graphTooltip": 1,
   "id": null,
   "links": [
@@ -444,72 +445,72 @@
                       },
                       "1": {
                         "text": "P1",
-                        "color": "#2B62D9",
+                        "color": "#3469DB",
                         "index": 1
                       },
                       "2": {
                         "text": "P2",
-                        "color": "#4880E0",
+                        "color": "#3E70DD",
                         "index": 2
                       },
                       "3": {
                         "text": "P3",
-                        "color": "#4880E0",
+                        "color": "#4777DE",
                         "index": 3
                       },
                       "4": {
                         "text": "P4",
-                        "color": "#6E9BE8",
+                        "color": "#507FE0",
                         "index": 4
                       },
                       "5": {
                         "text": "P5",
-                        "color": "#6E9BE8",
+                        "color": "#5986E2",
                         "index": 5
                       },
                       "6": {
                         "text": "P6",
-                        "color": "#6E9BE8",
+                        "color": "#638DE4",
                         "index": 6
                       },
                       "7": {
                         "text": "P7",
-                        "color": "#6E9BE8",
+                        "color": "#6C94E6",
                         "index": 7
                       },
                       "8": {
                         "text": "P8 \u00b7 Idle",
-                        "color": "#93B5EE",
+                        "color": "#759BE7",
                         "index": 8
                       },
                       "9": {
                         "text": "P9",
-                        "color": "#93B5EE",
+                        "color": "#7EA2E9",
                         "index": 9
                       },
                       "10": {
                         "text": "P10",
-                        "color": "#93B5EE",
+                        "color": "#88A9EB",
                         "index": 10
                       },
                       "11": {
                         "text": "P11",
-                        "color": "#93B5EE",
+                        "color": "#91B0ED",
                         "index": 11
                       },
                       "12": {
                         "text": "P12 \u00b7 Deep idle",
-                        "color": "#B6CDF4",
+                        "color": "#9AB8EF",
                         "index": 12
                       },
                       "13": {
                         "text": "P13",
-                        "color": "#B6CDF4",
+                        "color": "#A3BFF0",
                         "index": 13
                       },
                       "14": {
                         "text": "P14",
-                        "color": "#B6CDF4",
+                        "color": "#ADC6F2",
                         "index": 14
                       },
                       "15": {
@@ -570,7 +571,7 @@
                       },
                       "1": {
                         "text": "1 reason active",
-                        "color": "#FF9830",
+                        "color": "#FFB357",
                         "index": 1
                       },
                       "2": {
@@ -585,7 +586,7 @@
                       },
                       "4": {
                         "text": "4 reasons active",
-                        "color": "#E02F44",
+                        "color": "#C4162A",
                         "index": 4
                       }
                     }
@@ -703,7 +704,7 @@
                       },
                       "2": {
                         "text": "Node Reboot",
-                        "color": "#E02F44",
+                        "color": "#C4162A",
                         "index": 2
                       },
                       "3": {
@@ -753,7 +754,7 @@
       },
       "id": 1,
       "options": {
-        "cellHeight": "md",
+        "cellHeight": "sm",
         "footer": {
           "countRows": false,
           "fields": "",
@@ -979,7 +980,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -988,7 +989,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 2,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -1015,7 +1016,8 @@
           },
           "unit": "percentunit",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "noValue": "Not reported by driver"
         },
         "overrides": []
       },
@@ -1075,7 +1077,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -1084,7 +1086,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 2,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -1111,7 +1113,8 @@
           },
           "unit": "percentunit",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "noValue": "Not reported by driver"
         },
         "overrides": []
       },
@@ -1171,7 +1174,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -1180,7 +1183,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 2,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -1267,7 +1270,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -1276,7 +1279,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 2,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -1375,7 +1378,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -1384,7 +1387,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 2,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -1473,7 +1476,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -1482,7 +1485,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 2,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -1568,7 +1571,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -1577,7 +1580,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 2,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -1604,7 +1607,8 @@
           },
           "unit": "percentunit",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "noValue": "N/A"
         },
         "overrides": []
       },
@@ -1691,7 +1695,7 @@
                 },
                 "1": {
                   "text": "1 reason",
-                  "color": "#FF9830",
+                  "color": "#FFB357",
                   "index": 1
                 },
                 "2": {
@@ -1706,7 +1710,7 @@
                 },
                 "4": {
                   "text": "4 reasons",
-                  "color": "#E02F44",
+                  "color": "#C4162A",
                   "index": 4
                 }
               }
@@ -1788,72 +1792,72 @@
                 },
                 "1": {
                   "text": "P1",
-                  "color": "#2B62D9",
+                  "color": "#3469DB",
                   "index": 1
                 },
                 "2": {
                   "text": "P2",
-                  "color": "#4880E0",
+                  "color": "#3E70DD",
                   "index": 2
                 },
                 "3": {
                   "text": "P3",
-                  "color": "#4880E0",
+                  "color": "#4777DE",
                   "index": 3
                 },
                 "4": {
                   "text": "P4",
-                  "color": "#6E9BE8",
+                  "color": "#507FE0",
                   "index": 4
                 },
                 "5": {
                   "text": "P5",
-                  "color": "#6E9BE8",
+                  "color": "#5986E2",
                   "index": 5
                 },
                 "6": {
                   "text": "P6",
-                  "color": "#6E9BE8",
+                  "color": "#638DE4",
                   "index": 6
                 },
                 "7": {
                   "text": "P7",
-                  "color": "#6E9BE8",
+                  "color": "#6C94E6",
                   "index": 7
                 },
                 "8": {
                   "text": "P8 \u00b7 Idle",
-                  "color": "#93B5EE",
+                  "color": "#759BE7",
                   "index": 8
                 },
                 "9": {
                   "text": "P9",
-                  "color": "#93B5EE",
+                  "color": "#7EA2E9",
                   "index": 9
                 },
                 "10": {
                   "text": "P10",
-                  "color": "#93B5EE",
+                  "color": "#88A9EB",
                   "index": 10
                 },
                 "11": {
                   "text": "P11",
-                  "color": "#93B5EE",
+                  "color": "#91B0ED",
                   "index": 11
                 },
                 "12": {
                   "text": "P12 \u00b7 Deep idle",
-                  "color": "#B6CDF4",
+                  "color": "#9AB8EF",
                   "index": 12
                 },
                 "13": {
                   "text": "P13",
-                  "color": "#B6CDF4",
+                  "color": "#A3BFF0",
                   "index": 13
                 },
                 "14": {
                   "text": "P14",
-                  "color": "#B6CDF4",
+                  "color": "#ADC6F2",
                   "index": 14
                 },
                 "15": {
@@ -1936,7 +1940,7 @@
                 "barAlignment": 0,
                 "barWidthFactor": 0.6,
                 "drawStyle": "line",
-                "fillOpacity": 10,
+                "fillOpacity": 0,
                 "gradientMode": "none",
                 "hideFrom": {
                   "legend": false,
@@ -1945,7 +1949,7 @@
                 },
                 "insertNulls": false,
                 "lineInterpolation": "linear",
-                "lineWidth": 1,
+                "lineWidth": 2,
                 "pointSize": 5,
                 "scaleDistribution": {
                   "type": "linear"
@@ -2031,7 +2035,7 @@
                 "barAlignment": 0,
                 "barWidthFactor": 0.6,
                 "drawStyle": "line",
-                "fillOpacity": 10,
+                "fillOpacity": 0,
                 "gradientMode": "none",
                 "hideFrom": {
                   "legend": false,
@@ -2040,7 +2044,7 @@
                 },
                 "insertNulls": false,
                 "lineInterpolation": "linear",
-                "lineWidth": 1,
+                "lineWidth": 2,
                 "pointSize": 5,
                 "scaleDistribution": {
                   "type": "linear"
@@ -2140,7 +2144,7 @@
                 "barAlignment": 0,
                 "barWidthFactor": 0.6,
                 "drawStyle": "line",
-                "fillOpacity": 10,
+                "fillOpacity": 0,
                 "gradientMode": "none",
                 "hideFrom": {
                   "legend": false,
@@ -2149,7 +2153,7 @@
                 },
                 "insertNulls": false,
                 "lineInterpolation": "linear",
-                "lineWidth": 1,
+                "lineWidth": 2,
                 "pointSize": 5,
                 "scaleDistribution": {
                   "type": "linear"
@@ -2175,7 +2179,8 @@
                 ]
               },
               "min": 0,
-              "decimals": 0
+              "decimals": 0,
+              "noValue": "No ECC reported"
             },
             "overrides": []
           },
@@ -2254,7 +2259,7 @@
                     },
                     "2": {
                       "text": "Node Reboot",
-                      "color": "#E02F44",
+                      "color": "#C4162A",
                       "index": 2
                     },
                     "3": {
@@ -2269,7 +2274,8 @@
                     }
                   }
                 }
-              ]
+              ],
+              "noValue": "Not reported by driver"
             },
             "overrides": []
           },
@@ -2314,6 +2320,728 @@
         }
       ],
       "title": "Datacenter Health",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 21,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Power averaged from the driver's cumulative energy counter, smoother and more complete than the sampled power draw. Served only by the nvml and demo backends; absent under the default exec backend.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "watt",
+              "noValue": "No energy data"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 47
+          },
+          "id": 22,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "(rate(nvidia_smi_energy_joules_total{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}[$__rate_interval])) * on(uuid) group_left(index, name) nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}",
+              "instant": false,
+              "range": true,
+              "refId": "A",
+              "legendFormat": "#{{index}} {{name}}"
+            }
+          ],
+          "title": "Power Draw (energy counter)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "PCIe transmit throughput per GPU, sampled by the driver over 20ms windows. Requires --collect.pcie-throughput on the nvml backend. Served only by the nvml and demo backends; absent under the default exec backend.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "Bps",
+              "noValue": "No PCIe data"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 47
+          },
+          "id": 23,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "(nvidia_smi_pcie_throughput_tx_bytes_per_second{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}) * on(uuid) group_left(index, name) nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}",
+              "instant": false,
+              "range": true,
+              "refId": "A",
+              "legendFormat": "#{{index}} {{name}}"
+            }
+          ],
+          "title": "PCIe TX",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "PCIe receive throughput per GPU, sampled by the driver over 20ms windows. Requires --collect.pcie-throughput on the nvml backend. Served only by the nvml and demo backends; absent under the default exec backend.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "Bps",
+              "noValue": "No PCIe data"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 47
+          },
+          "id": 24,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "(nvidia_smi_pcie_throughput_rx_bytes_per_second{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}) * on(uuid) group_left(index, name) nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}",
+              "instant": false,
+              "range": true,
+              "refId": "A",
+              "legendFormat": "#{{index}} {{name}}"
+            }
+          ],
+          "title": "PCIe RX",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Cumulative XID errors per GPU since the exporter started (earlier history cannot be replayed, so a restart resets the counts). Flat zero is healthy. Do not alert on increase() of this counter: a series' first event is invisible to it, alert on the last-timestamp metric instead (see METRICS.md). Served only by the nvml and demo backends; absent under the default exec backend.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "none",
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 55
+          },
+          "id": 25,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "(sum by (uuid) (nvidia_smi_xid_errors_total{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"})) * on(uuid) group_left(index, name) (max by (uuid, index, name) (nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"})) or ((max by (uuid, index, name) (nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"})) * 0) or (sum by (uuid) (nvidia_smi_xid_errors_total{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}) unless on(uuid) nvidia_smi_gpu_info{instance=\"$node\", job=\"$job\"})",
+              "instant": false,
+              "range": true,
+              "refId": "A",
+              "legendFormat": "#{{index}} {{name}}"
+            }
+          ],
+          "title": "XID Errors (since exporter start)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "-1": {
+                      "text": "Never",
+                      "color": "#56A64B",
+                      "index": 0
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "pluginVersion": "11.2.0",
+          "type": "table",
+          "id": 28,
+          "title": "Last XID per GPU",
+          "description": "Seconds since each GPU last raised each XID code. 'Never' means no errors since the exporter started. This is the signal to alert on: unlike increase() on the error counter, it also sees each series' first event (see METRICS.md). Served only by the nvml and demo backends; absent under the default exec backend.",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 55
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "(time() - max by (uuid, xid) (nvidia_smi_xid_last_timestamp_seconds{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"})) * on(uuid) group_left(index, name) (max by (uuid, index, name) (nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"})) or ((max by (uuid, index, name) (nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"})) * 0 - 1) unless on(uuid) nvidia_smi_xid_last_timestamp_seconds{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"} or ((time() - max by (uuid, xid) (nvidia_smi_xid_last_timestamp_seconds{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"})) unless on(uuid) nvidia_smi_gpu_info{instance=\"$node\", job=\"$job\"})",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "uuid": true
+                },
+                "indexByName": {
+                  "index": 0,
+                  "name": 1,
+                  "xid": 2,
+                  "Value": 3
+                },
+                "renameByName": {
+                  "index": "#",
+                  "name": "GPU",
+                  "xid": "XID",
+                  "Value": "Since last"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "",
+              "mappings": [],
+              "noValue": "No MIG instances reported"
+            },
+            "overrides": []
+          },
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "pluginVersion": "11.2.0",
+          "type": "table",
+          "id": 29,
+          "title": "MIG Instances",
+          "description": "The node's MIG partitions: one row per GPU instance (compute instances sharing it are collapsed, like the per-instance metrics). Empty when no GPU on the node is partitioned. Served only by the nvml and demo backends; absent under the default exec backend.",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 55
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "(max by (uuid, gpu_instance_id, profile) (nvidia_smi_mig_info{instance=\"$node\", job=\"$job\"})) * on(uuid) group_left(index, name) (max by (uuid, index, name) (nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}))",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "uuid": true,
+                  "Value": true
+                },
+                "indexByName": {
+                  "index": 0,
+                  "name": 1,
+                  "gpu_instance_id": 2,
+                  "profile": 3
+                },
+                "renameByName": {
+                  "index": "#",
+                  "name": "GPU",
+                  "gpu_instance_id": "GPU instance",
+                  "profile": "Profile"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "SM activity per MIG GPU instance across the node's partitioned GPUs. Empty when no GPU has MIG partitions; the first collection that sees an instance serves nothing (the sampling needs a pair of collections). Served only by the nvml and demo backends; absent under the default exec backend.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "noValue": "No MIG activity data"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 63
+          },
+          "id": 26,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "((nvidia_smi_mig_sm_activity_ratio{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}) * on(uuid, gpu_instance_id) group_left(profile) (max by (uuid, gpu_instance_id, profile) (label_replace(nvidia_smi_mig_info{instance=\"$node\", job=\"$job\"}, \"profile\", \"$1\", \"profile\", \"^[0-9]+c\\\\.(.*)$\")))) * on(uuid) group_left(index, name) nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}",
+              "instant": false,
+              "range": true,
+              "refId": "A",
+              "legendFormat": "#{{index}} GI {{gpu_instance_id}} ({{profile}})"
+            }
+          ],
+          "title": "MIG SM Activity",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "id": 30,
+          "title": "MIG Memory Used",
+          "description": "Framebuffer memory used per MIG GPU instance (memory is a GPU-instance-level resource, shared by its compute instances). Served only by the nvml and demo backends; absent under the default exec backend.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 63
+          },
+          "type": "bargauge",
+          "pluginVersion": "11.2.0",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "min": 0,
+              "mappings": [],
+              "color": {
+                "mode": "continuous-GrYlRd"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "noValue": "No MIG memory data"
+            },
+            "overrides": []
+          },
+          "options": {
+            "displayMode": "gradient",
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "maxVizHeight": 300,
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "sizing": "auto",
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "((nvidia_smi_mig_memory_used_bytes{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}) * on(uuid, gpu_instance_id) group_left(profile) (max by (uuid, gpu_instance_id, profile) (label_replace(nvidia_smi_mig_info{instance=\"$node\", job=\"$job\"}, \"profile\", \"$1\", \"profile\", \"^[0-9]+c\\\\.(.*)$\")))) * on(uuid) group_left(index, name) nvidia_smi_gpu_info{uuid=~\"$gpu\", instance=\"$node\", job=\"$job\"}",
+              "instant": false,
+              "range": true,
+              "refId": "A",
+              "legendFormat": "#{{index}} GI {{gpu_instance_id}} ({{profile}})"
+            }
+          ]
+        }
+      ],
+      "title": "XID / MIG / Power / PCIe (NVML mode only)",
       "type": "row"
     }
   ],

@@ -1,78 +1,184 @@
 # nvidia_gpu_exporter
 
-[![build](https://github.com/utkuozdemir/nvidia_gpu_exporter/actions/workflows/build.yml/badge.svg)](https://github.com/utkuozdemir/nvidia_gpu_exporter/actions/workflows/build.yml)
-[![codecov](https://codecov.io/gh/utkuozdemir/nvidia_gpu_exporter/branch/main/graph/badge.svg?token=JEWV818FCZ)](https://codecov.io/gh/utkuozdemir/nvidia_gpu_exporter)
-[![Go Report Card](https://goreportcard.com/badge/github.com/utkuozdemir/nvidia_gpu_exporter?kill_cache=1)](https://goreportcard.com/report/github.com/utkuozdemir/nvidia_gpu_exporter)
-![Latest GitHub release](https://img.shields.io/github/release/utkuozdemir/nvidia_gpu_exporter.svg)
-[![GitHub license](https://img.shields.io/github/license/utkuozdemir/nvidia_gpu_exporter)](https://github.com/utkuozdemir/nvidia_gpu_exporter/blob/main/LICENSE)
-![GitHub all releases](https://img.shields.io/github/downloads/utkuozdemir/nvidia_gpu_exporter/total)
-![Docker Pulls](https://img.shields.io/docker/pulls/utkuozdemir/nvidia_gpu_exporter)
+[![build](https://img.shields.io/github/actions/workflow/status/utkuozdemir/nvidia_gpu_exporter/build.yml?branch=main&label=build&style=flat-square)](https://github.com/utkuozdemir/nvidia_gpu_exporter/actions/workflows/build.yml)
+[![coverage](https://img.shields.io/codecov/c/github/utkuozdemir/nvidia_gpu_exporter/main?style=flat-square)](https://codecov.io/gh/utkuozdemir/nvidia_gpu_exporter)
+[![OpenSSF scorecard](https://img.shields.io/ossf-scorecard/github.com/utkuozdemir/nvidia_gpu_exporter?label=openssf%20scorecard&style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/utkuozdemir/nvidia_gpu_exporter)
+[![latest release](https://img.shields.io/github/v/release/utkuozdemir/nvidia_gpu_exporter?style=flat-square)](https://github.com/utkuozdemir/nvidia_gpu_exporter/releases)
+[![license](https://img.shields.io/github/license/utkuozdemir/nvidia_gpu_exporter?style=flat-square)](https://github.com/utkuozdemir/nvidia_gpu_exporter/blob/main/LICENSE)
+[![OpenSSF best practices](https://img.shields.io/cii/level/14375?label=openssf%20best%20practices&style=flat-square)](https://www.bestpractices.dev/projects/14375)
 
-Nvidia GPU exporter for prometheus, using `nvidia-smi` binary to gather metrics.
+[![release downloads](https://img.shields.io/github/downloads/utkuozdemir/nvidia_gpu_exporter/total?style=flat-square)](https://github.com/utkuozdemir/nvidia_gpu_exporter/releases)
+[![Docker pulls](https://img.shields.io/docker/pulls/utkuozdemir/nvidia_gpu_exporter?style=flat-square)](https://hub.docker.com/r/utkuozdemir/nvidia_gpu_exporter)
+[![Nvidia GPU Metrics dashboard imports](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgrafana.com%2Fapi%2Fdashboards%2F14574&query=%24.downloads&label=gpu%20metrics%20dashboard&suffix=%20imports&color=F46800&logo=grafana&logoColor=white&style=flat-square)](https://grafana.com/grafana/dashboards/14574)
+[![Nvidia GPU Overview dashboard imports](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgrafana.com%2Fapi%2Fdashboards%2F25547&query=%24.downloads&label=gpu%20overview%20dashboard&suffix=%20imports&color=F46800&logo=grafana&logoColor=white&style=flat-square)](https://grafana.com/grafana/dashboards/25547)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/nvidia-gpu-exporter&style=flat-square)](https://artifacthub.io/packages/helm/nvidia-gpu-exporter/nvidia-gpu-exporter)
+[![winget](https://img.shields.io/winget/v/utkuozdemir.nvidia_gpu_exporter?style=flat-square)](docs/INSTALL.md#winget)
+
+Nvidia GPU exporter for Prometheus, using the `nvidia-smi` binary to gather metrics.
+Runs on Linux, Windows and macOS, on bare metal, in Docker or on Kubernetes.
 
 ---
 
 > [!WARNING]
-> **Maintenance Status:** I get that it can be frustrating not to hear back about the stuff you've brought up or the changes you've suggested. But honestly, for over a year now, I've hardly had any time to keep up with my personal open-source projects, including this one. I am still committed to keep this tool working and slowly move it forward, but please bear with me if I can't tackle your fixes or check out your code for a while. Thanks for your understanding.
+> Heads up: this is a side project I maintain in my spare time. I might take a long time to look at issues or PRs, or not get to them at all. Sorry in advance, and thanks for understanding.
 
 ---
 
 ## Introduction
 
-There are many Nvidia GPU exporters out there however they have problems such as not being maintained,
-not providing pre-built binaries, having a dependency to Linux and/or Docker,
-targeting enterprise setups (DCGM) and so on.
+This is a simple exporter that uses the `nvidia-smi(.exe)` binary to collect,
+parse and export metrics. Since it only needs `nvidia-smi`, it also works on
+Windows - no Docker or Linux required.
 
-This is a simple exporter that uses `nvidia-smi(.exe)` binary to collect, parse and export metrics.
-This makes it possible to run it on Windows and get GPU metrics while gaming - no Docker or Linux required.
+It can also skip `nvidia-smi` entirely and read the metrics straight from
+the driver library. See [the NVML backend](#try-the-native-nvml-backend)
+below.
 
-This project is based on [a0s/nvidia-smi-exporter](https://github.com/a0s/nvidia-smi-exporter).
-However, this one is written in Go to produce a single, static binary.
+## Quick start
 
-**If you are a gamer who's into monitoring, you are in for a treat.**
+On a Linux machine with the NVIDIA driver and the NVIDIA Container Toolkit:
+
+```bash
+docker run -d --name nvidia_gpu_exporter --restart unless-stopped \
+  --gpus all -e NVIDIA_DRIVER_CAPABILITIES=utility -p 9835:9835 \
+  utkuozdemir/nvidia_gpu_exporter:latest
+curl http://localhost:9835/metrics
+```
+
+No GPU at hand? `nvidia_gpu_exporter --collect.backend demo` serves realistic
+synthetic metrics on any machine. For Windows, macOS, packages, Kubernetes and
+running without Docker, see [INSTALL.md](docs/INSTALL.md).
+
+## Use cases
+
+- Consumer and prosumer GPUs (GeForce/RTX), where the datacenter tooling
+  exposes little and `nvidia-smi` is often the only uniform source of
+  utilization, memory, power and temperature
+- Small Kubernetes clusters, edge boxes and homelabs that want GPU metrics
+  without installing the NVIDIA GPU Operator stack
+- Virtualized or restricted setups (vGPU guests, MIG slices, locked-down containers)
+  where the deeper GPU counters are not exposed but `nvidia-smi` still answers
+- Mixed fleets of old and new cards that need one exporter that behaves the
+  same everywhere
+- Gaming rigs, for watching your GPU stats on a dashboard while you play
+
+If you run datacenter cards on Kubernetes with the GPU Operator already
+installed, [DCGM-exporter](https://github.com/NVIDIA/dcgm-exporter) is
+probably the better fit. This exporter aims at the cases above.
 
 ## Highlights
 
 - Will work on any system that has `nvidia-smi(.exe)?` binary - Windows, Linux, MacOS... No C bindings required
-- Doesn't even need to run the monitored machine: can be configured to execute `nvidia-smi` command remotely
-- No need for a Docker or Kubernetes environment
+- Doesn't even need to run on the monitored machine: can be configured to execute `nvidia-smi` command remotely
 - Auto-discovery of the metric fields `nvidia-smi` can expose (future-compatible)
 - Optional per-process GPU metrics: see which process uses how much GPU memory
-- Comes with its own [Grafana dashboard](https://grafana.com/grafana/dashboards/14574)
+- Optional background collection: run `nvidia-smi` on a timer instead of on every scrape
+- Comes with its own Grafana dashboards: a [per-GPU detail](https://grafana.com/grafana/dashboards/14574) one and a [multi-GPU overview](https://grafana.com/grafana/dashboards/25547)
+
+## Try the native NVML backend
+
+On Linux, the exporter can skip `nvidia-smi` and read the metrics directly
+from the NVIDIA driver library (NVML). Every metric the default backend
+serves stays identical in name, labels and value, so existing dashboards and
+alerts keep working.
+
+On top of that it adds families `nvidia-smi` cannot provide: per-MIG-instance
+metrics, XID error counters, a total energy counter and PCIe throughput. The
+official Grafana dashboards have panels for all of these. They sit empty on
+the default backend and fill up on this one.
+
+It ships as its own release flavor that already defaults to this backend:
+grab a `-nvml` archive from the
+[releases page](https://github.com/utkuozdemir/nvidia_gpu_exporter/releases),
+or use a `-nvml` image tag:
+
+```bash
+docker run -d \
+  --name nvidia_gpu_exporter \
+  --restart unless-stopped \
+  --gpus all \
+  -e NVIDIA_DRIVER_CAPABILITIES=utility \
+  -p 9835:9835 \
+  utkuozdemir/nvidia_gpu_exporter:latest-nvml
+```
+
+It is marked experimental mainly because it needs more testing across driver
+versions and GPU generations. If you try it, [open an
+issue](https://github.com/utkuozdemir/nvidia_gpu_exporter/issues) about how
+it went, good or bad. That is what will get it past the experimental label.
+
+See [CONFIGURE.md](docs/CONFIGURE.md#experimental-native-nvml-backend) for
+the full backend comparison and the current limits.
+
+## Try it without a GPU
+
+Demo mode serves realistic synthetic metrics, including the NVML-only
+families, with no GPU, driver or even Linux required:
+
+```bash
+nvidia_gpu_exporter --collect.backend demo
+```
+
+By default it simulates two H200 GPUs with fluctuating values, a MIG topology
+and an XID error history. The simulated setup is configurable, see
+[CONFIGURE.md](docs/CONFIGURE.md#demo-mode).
 
 ## Visualization
 
-You can use the official [Grafana dashboard](https://grafana.com/grafana/dashboards/14574)
-to see your GPU metrics in a nicely visualized way.
+There are two official Grafana dashboards, and they link to each other in Grafana:
 
-Here's how it looks like:
-![Grafana dashboard](https://raw.githubusercontent.com/utkuozdemir/nvidia_gpu_exporter/main/docs/grafana/dashboard.png)
+- [Nvidia GPU Metrics](https://grafana.com/grafana/dashboards/14574) (ID `14574`),
+  the per-GPU detail view.
+- [Nvidia GPU Overview](https://grafana.com/grafana/dashboards/25547) (ID `25547`),
+  which compares all GPUs of a node side by side and drills down into the
+  detail dashboard.
 
-For machines with more than one GPU there is a companion
-[overview dashboard](https://github.com/utkuozdemir/nvidia_gpu_exporter/blob/main/docs/grafana/dashboard-overview.json)
-that compares all GPUs of a node side by side and drills down into the
-single-GPU dashboard above. Import it from the JSON file, or enable
-`grafanaDashboard` in the Helm chart to get both dashboards provisioned.
+Import either by ID in Grafana (*Dashboards* - *New* - *Import*), or enable
+`grafanaDashboard` in the Helm chart to get both provisioned automatically.
+The JSON is also in this repository under [docs/grafana](docs/grafana).
 
-![Grafana overview dashboard](https://raw.githubusercontent.com/utkuozdemir/nvidia_gpu_exporter/main/docs/grafana/dashboard-overview.png)
+Here's how they look:
+
+![Nvidia GPU Metrics](https://raw.githubusercontent.com/utkuozdemir/nvidia_gpu_exporter/main/docs/grafana/dashboard.png)
+
+![Nvidia GPU Overview](https://raw.githubusercontent.com/utkuozdemir/nvidia_gpu_exporter/main/docs/grafana/dashboard-overview.png)
 
 ## Installation
 
-See [INSTALL.md](docs/INSTALL.md) for details.
+[INSTALL.md](docs/INSTALL.md) has the steps for every platform: Linux
+(deb/rpm packages or a plain binary, with a systemd unit), Docker, Kubernetes
+(the [Helm chart](charts/nvidia-gpu-exporter)), Windows (winget, Scoop, a
+native Windows service, or an all-in-one script that also sets up Prometheus
+and Grafana) and macOS.
+
+The container images are on
+[Docker Hub](https://hub.docker.com/r/utkuozdemir/nvidia_gpu_exporter) and
+[GHCR](https://github.com/utkuozdemir/nvidia_gpu_exporter/pkgs/container/nvidia_gpu_exporter),
+the Helm chart is on
+[Artifact Hub](https://artifacthub.io/packages/helm/nvidia-gpu-exporter/nvidia-gpu-exporter),
+and the binaries and packages are on the
+[releases page](https://github.com/utkuozdemir/nvidia_gpu_exporter/releases).
 
 ## Verifying releases
 
 Release artifacts are signed so you can check they came from this project's
 release pipeline:
 
-- The `checksums.txt` file attached to each release is signed with GPG
-  (`checksums.txt.asc`), which covers every binary, archive and package.
-- The container images and the Helm chart are signed keyless with
-  [cosign](https://github.com/sigstore/cosign), tied to the release workflow's
-  identity.
+- The `checksums.txt` file attached to a release carries a keyless
+  [cosign](https://github.com/sigstore/cosign) signature bundle
+  (`checksums.txt.sigstore.json`), which covers every binary, archive and
+  package. Releases without that file have a GPG signature instead, see the
+  install guide.
+- The container images and the Helm chart are signed keyless with cosign too,
+  tied to the release workflow's identity. The chart's classic repository
+  additionally carries GPG provenance files, since Helm verifies only those.
 
 See [INSTALL.md](docs/INSTALL.md) for the exact verification commands, and the
 [chart README](charts/nvidia-gpu-exporter/README.md) for the chart.
+
+[SECURITY_MODEL.md](docs/SECURITY_MODEL.md) describes what you can expect from
+the exporter security-wise and where the trust boundaries are.
+[SECURITY.md](.github/SECURITY.md) says how to report a problem.
 
 ## Configuration
 
@@ -84,32 +190,36 @@ See [METRICS.md](docs/METRICS.md) for details.
 
 ## Contributing
 
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for details.
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the process and the
+development setup, [ROADMAP.md](docs/ROADMAP.md) for what is planned and what
+is not, and [GOVERNANCE.md](.github/GOVERNANCE.md) for how decisions are made.
 
-### Help wanted: contribute a GPU capture
+### Contribute a GPU capture
 
-The exporter parses `nvidia-smi` output, which differs across GPU models, driver
-versions and operating systems. If you have hardware that isn't covered yet
-(datacenter cards, MIG, multi-GPU, Windows/WSL2, brand-new drivers...), you can
-help a lot by capturing your `nvidia-smi` output with one command:
+The exporter parses `nvidia-smi` output, which differs across GPU models,
+driver versions and operating systems. The test corpus already covers a good
+range of hardware. A capture from a setup it has not seen yet, e.g., a new
+GPU model or a brand-new driver, is still a welcome contribution, and it
+takes one command:
 
 ```bash
 ./internal/captures/collect.sh          # add --load for an under-load sample too
 ```
 
-It needs only `nvidia-smi`, `bash`, and the standard core utilities (`awk`,
-`sed`, ...), runs read-only, and masks identifiers (GPU UUID, serial, hostname)
-by default. It writes one `.txt` file: commit it and open a PR, or attach it to
-an issue. See [internal/captures/README.md](internal/captures/README.md).
+It needs only `nvidia-smi`, `bash` and the standard core utilities (`awk`,
+`sed`, ...). It runs read-only and masks identifiers (GPU UUID, serial,
+hostname) by default.
+
+It writes one `.txt` file. Commit it and open a PR, or attach it to an issue.
+See [internal/captures/README.md](internal/captures/README.md).
 
 ## Star History
 
 <!-- markdownlint-disable no-inline-html -->
-<a href="https://star-history.com/#utkuozdemir/nvidia_gpu_exporter&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=utkuozdemir/nvidia_gpu_exporter&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=utkuozdemir/nvidia_gpu_exporter&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=utkuozdemir/nvidia_gpu_exporter&type=Date" />
- </picture>
+<a href="https://github.com/utkuozdemir/nvidia_gpu_exporter/stargazers">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/utkuozdemir/star-charts/main/charts/utkuozdemir/nvidia_gpu_exporter/dark.svg" />
+    <img alt="Star history of utkuozdemir/nvidia_gpu_exporter" src="https://raw.githubusercontent.com/utkuozdemir/star-charts/main/charts/utkuozdemir/nvidia_gpu_exporter/light.svg" />
+  </picture>
 </a>
 <!-- markdownlint-enable no-inline-html -->

@@ -1,11 +1,35 @@
 # Local dev stack
 
-A one-command stack for developing the exporter and its Grafana dashboards on a
-machine with **no GPU**. It runs the real exporter against the fake nvidia-smi
-(`cmd/fake-nvidia-smi`), scrapes it with Prometheus, and serves the dashboards
-in Grafana with live, moving values. Two exporter instances play two "nodes"
-(an eight-GPU consumer box on `fake.yaml`, a two-GPU passive L40S box on
-`fake2.yaml`), so per-node filtering and multi-GPU comparison are exercisable.
+A one-command stack for developing the exporter and its Grafana dashboards on
+a machine with **no GPU**. It simulates two machines and serves each through
+**both** backend flavors, so the dashboards can compare the same machine's
+exec surface against its NVML surface and every visible difference is a real
+surface difference, not a different-simulated-hardware artifact:
+
+- **machine "consumer"** (`machines/consumer.yaml`): an eight-GPU consumer inference
+  box, one card deliberately sick (health banner, throttle timeline,
+  temperature alerts).
+- **machine "datacenter"** (`machines/datacenter.yaml`): an eight-GPU H200 node,
+  the shape an HGX box ships in, with MIG topologies on two cards (one GPU
+  instance deliberately hosting two compute instances, the live probe for
+  dashboard join cardinality) and an XID error history. The eight cards are
+  deliberately doing eight different things, from a pegged training rank to one
+  that is broken and being drained, because this is the machine the README's dashboard
+  images are taken from and a node where every card reads alike shows nothing.
+  Each card's band is narrow for the same reason: a scrape draws from a band
+  independently, so a wide one is not a value that drifts but one that
+  teleports.
+
+Flavors: `exec-consumer`/`exec-datacenter` run the real exec pipeline against the fake
+nvidia-smi binary, scraped by `prometheus` (:9090); `nvml-consumer`/`nvml-datacenter` run
+the demo backend, which serves the NVML surface (MIG, XID, energy, PCIe) on
+top of the same table, scraped by `prometheus-demo` (:9091). Both
+Prometheuses label the same machine with the same instance name (`consumer`,
+`datacenter`), so flipping the Grafana data source dropdown keeps the node selection
+pointed at the same machine.
+
+The provisioned dev dashboards preselect the NVML data source, the richer
+surface where dashboard work happens.
 
 ## Run
 
@@ -17,11 +41,15 @@ in Grafana with live, moving values. Two exporter instances play two "nodes"
 Then open:
 
 - Grafana: <http://localhost:3000> (anonymous admin, no login) — the **Nvidia GPU
-  Metrics** and **Nvidia GPU Overview** dashboards are provisioned and already
-  pointed at Prometheus.
-- Prometheus: <http://localhost:9090>
-- Exporter metrics: <http://localhost:9835/metrics> (node one),
-  <http://localhost:9836/metrics> (node two)
+  Metrics** and **Nvidia GPU Overview** dashboards are provisioned; switch the
+  *Data source* dropdown between "Prometheus - NVML" and "Prometheus - Exec"
+  to compare the two surfaces of the selected machine.
+- Prometheus (exec): <http://localhost:9090>, (NVML): <http://localhost:9091>
+- Alertmanager: <http://localhost:9093> — the chart's alert rules evaluated
+  against both flavors (see "Verify the alert rules")
+- Exporter metrics: <http://localhost:9835/metrics> (exec-consumer),
+  <http://localhost:9836/metrics> (exec-datacenter), <http://localhost:9837/metrics>
+  (nvml-consumer), <http://localhost:9838/metrics> (nvml-datacenter)
 
 Stop and wipe the throwaway state (Prometheus/Grafana volumes):
 
@@ -29,19 +57,115 @@ Stop and wipe the throwaway state (Prometheus/Grafana volumes):
 cd hack/compose && docker compose down -v
 ```
 
-The compose code, provisioning, and `fake.yaml` are committed and maintained; the
-running containers and their data volumes are disposable.
+The compose code, provisioning and the machine configs are committed and
+maintained; the running containers and their data volumes are disposable.
+Volumes created by earlier revisions of this stack (different data source or
+service names) make Grafana or Prometheus trip over stale state; run
+`docker compose down -v` once to reset.
+
+`render-dashboard.sh` (run by `up.sh`) needs `python3` on the host, in
+addition to Docker. `render-rules.sh` (also run by `up.sh`) needs only
+Docker: it runs helm and yq from pinned images. `screenshots.sh` needs
+`python3` and `curl`, and runs its palette pass from a pinned image for the
+same reason.
+
+## Verify the alert rules
+
+`render-rules.sh` renders the Helm chart's PrometheusRule into
+`prometheus/rules/` with **every** rule force-enabled and all `for:`
+durations shortened to 30s, so the stack always evaluates exactly what the
+chart ships and alerts appear within a minute. Both Prometheuses evaluate
+the same rules and send to the one Alertmanager; their `backend` external
+label (`exec`/`demo`) keeps the two flavors' alerts apart there. After
+changing the chart's rules, re-run `./hack/compose/render-rules.sh` and
+Prometheus picks the change up on restart (`docker compose restart
+prometheus prometheus-demo`).
+
+What fires out of the box, all on the sick consumer card unless noted:
+
+- `NvidiaGpuRecoveryActionNeeded`, `NvidiaGpuUncorrectableEccErrors`,
+  `NvidiaGpuRowRemapFailure`, `NvidiaGpuRowRemapPending`,
+  `NvidiaGpuRetiredPagesPending`, `NvidiaGpuThermalSlowdown`,
+  `NvidiaGpuTemperatureHigh` — from the sick card's pinned overrides, on
+  both backends.
+- `NvidiaGpuXidCritical` (Xid 79) and `NvidiaGpuXidWarning` (Xid 94) — from
+  the datacenter machine's seeded XID history, demo backend only (the exec
+  surface honestly has no XID metrics). Xid 13 is also seeded and
+  deliberately fires nothing (application fault).
+- `NvidiaGpuRecoveryActionNeeded` and `NvidiaGpuUncorrectableEccErrors` —
+  from the datacenter machine's GPU 4, on both backends. That card carries
+  uncorrectable ECC errors and the "Drain and Reset" recovery action the
+  driver asks for because of them, and is idle and cool because nothing is
+  being scheduled onto a card waiting to be reset. The consumer machine's
+  sick card fires the same two from a different cause, so both surfaces have
+  a broken card to look at.
+- `NvidiaGpuSoftwareThermalSlowdown` — from the datacenter machine's GPU 0,
+  on both backends. That card is pinned at its thermal target (81-84C) with
+  the software thermal flag set and its clocks and power held down to match,
+  so the throttle timeline and the clock panels tell the same story. It is
+  the one alertable flag any card on this machine sets deliberately, and it is
+  sustained rather than flickering. The rule ships disabled by default in the
+  chart; the dev render force-enables everything.
+- Healthy cards fire nothing: the alertable slowdown flags are pinned 0 on
+  them, and only cosmetic flags flip randomly.
+
+The exporter self-health alerts need a broken exporter, kept out of the
+default stack:
+
+- `NvidiaGpuExporterCollectionFailing`: start the failure box with
+  `docker compose --profile broken up -d exec-broken` — its fake nvidia-smi
+  exits non-zero from boot (instance `broken` on the exec Prometheus).
+- `NvidiaGpuExporterCollectionStale`: edit `machines/consumer.yaml` live and
+  add `exit: 15` at the top level; collection starts failing fast, the last
+  success timestamp ages, and the stale alert follows the failing one.
+  Remove the line to recover. A from-boot broken exporter never emits the
+  stale timestamp, which is why stale needs this healthy-then-fail
+  transition instead of the broken profile.
+- `NvidiaGpuExporterCollectionSlow`: add `delay: 2s` instead. Careful with
+  larger values: the delay applies per fake-nvidia-smi invocation, the
+  compute-apps query doubles it, and past the stack's 5s scrape timeout the
+  scrape dies before it can report a slow duration (the dev render lowers
+  the slow threshold to 2s for exactly this headroom reason).
+- `NvidiaGpuPowerBrake`: flip the machine-level
+  `clocks_event_reasons.hw_power_brake_slowdown` override in
+  `machines/consumer.yaml` from `0` to `1`; revert to recover.
+  (`NvidiaGpuSoftwareThermalSlowdown` already fires from the datacenter
+  machine, see above.)
+- `NvidiaGpuMissing`: shrink the `gpus:` list of a machine live (e.g. 8 to
+  7 entries); the alert compares against the recent 6h maximum. The
+  all-GPUs-gone form cannot be driven here (the fake refuses a zero-GPU
+  config, which breaks collection and trips the healthy-collection gate
+  instead); it is covered by a promtool unit test in `hack/alerts/`.
+
+## What "same machine, two surfaces" means (and its limits)
+
+Both flavors of a machine read the same YAML file: same capture, same GPU
+identities (the generated uuids are derived from the GPU index, identically
+in both flavors), same overrides, same jitter bands. Values still jitter
+independently per flavor (each invocation draws its own randomness), so the
+two data sources show the same machine under the same conditions, not
+tick-identical numbers. Structural differences that remain are real:
+
+- The NVML flavor serves the extras families (`mig_*`, `xid_*`,
+  `energy_joules_total`, `pcie_throughput_*`) and `nvml_return_code`; the
+  exec flavor serves `command_exit_code` and no extras. That is the honest
+  difference between the surfaces.
+- The NVML flavor synthesizes the extras (the demo backend approximates the
+  real nvml backend's surface); the sick-GPU drama and the whole table are
+  identical in kind on both sides.
 
 ## Make the data interesting
 
-`fake/fake.yaml` drives the fake. `fluctuate: true` jitters everything that
-naturally moves (utilization, temperature, power, clocks, fan, memory) around
-the captured values, `gpus:` simulates eight cards from the single-GPU capture
-(the last one deliberately sick, to preview the health states in the GPU
-dropdown), and `overrides:` drive the states the jitter does not cover, like
-the throttle flags. The fake is invoked fresh on every scrape, so **editing
-`fake/fake.yaml` changes the next scrape with no restart** (give it one scrape
-interval). To preview a specific panel state, pin a field:
+`machines/*.yaml` drive everything. `fluctuate: true` jitters what naturally
+moves (utilization, temperature, power, clocks, fan, memory) around the
+captured values, `gpus:` replicates the capture into several cards with
+stable identities and per-GPU overrides (consumer's last card carries the sick
+overrides), and `overrides:` pin the states jitter does not cover. Both
+flavors re-read the file on every scrape/collection cycle, so **editing a
+machine file changes the next scrape of both its flavors, no restart** (give
+it one scrape interval; an edit resets the NVML flavor's synthesized
+counters, like a driver reload). To preview a specific panel state, pin a
+field:
 
 ```yaml
 overrides:
@@ -49,22 +173,53 @@ overrides:
   temperature.gpu: 95            # drive the temperature threshold color
 ```
 
-Field names are nvidia-smi query fields; see `internal/captures/README.md`. To
-drive a different card, change `capture:` to any embedded capture name.
-`fake2.yaml` drives the second exporter the same way; its passive L40S cards
-report no fan speed, which exercises the "metric absent" paths on the
-dashboards.
+Field names are nvidia-smi query fields; see `internal/captures/README.md`.
+To drive a different card, change `capture:` to any embedded capture name
+(the demo backend embeds the H200 and RTX 4080 SUPER captures; the fake
+binary embeds the full corpus). The `extras:` block (MIG topology, XID
+events, PCIe ranges) is read by the demo backend and ignored by the fake —
+the full reference is the demo mode section in `docs/CONFIGURE.md`.
+
+## Regenerate the README's dashboard images
+
+```bash
+./hack/compose/screenshots.sh    # or: task screenshots
+```
+
+Brings the stack up with the `screenshot` profile, which adds a
+`grafana-image-renderer` sidecar, and writes `docs/grafana/dashboard*.png`.
+Nothing else uses the profile, so ordinary runs neither pull nor start that
+image.
+
+There is no browser automation involved: the renderer is a service Grafana
+talks to, and a capture is an HTTP GET with `height=-1` for the whole page. It
+will not open a collapsed row, so the script points it at the row-expanded
+copies that `render-dashboard.sh --screenshot` derives.
+
+Both captures are the whole page, taken at the same instant, with `height=-1`
+asking the renderer for the full height rather than a viewport, at twice the
+nominal width so the small type survives being downsampled into a README. They
+are then reduced to a palette, which is what makes rendering at that size
+affordable: a dashboard is mostly flat colour, so the palette carries the whole
+picture at roughly the size of the hand-made images it replaces.
+
+A cold stack waits once, for `WINDOW` (2 minutes), which is how far back the
+pictures reach; a stack that has been up waits for nothing.
+`OUT_DIR=somewhere` writes the images elsewhere, which is how a run is
+reviewed without touching the committed ones.
 
 ## Iterate on the dashboards
 
 The dashboards are authored in the Grafana UI and exported to
 `docs/grafana/dashboard.json` (single-GPU detail, grafana.com 14574) and
-`docs/grafana/dashboard-overview.json` (multi-GPU comparison). Those files
-select their data source through a template variable, which resolves to
-this stack's sole Prometheus on its own, so `render-dashboard.sh` simply
-copies them into the provisioning directory.
+`docs/grafana/dashboard-overview.json` (multi-GPU comparison, grafana.com
+25547). Those files
+select their data source through a template variable; `render-dashboard.sh`
+copies them into the provisioning directory, flipping `editable` on and
+preselecting the NVML data source (the published artifacts themselves stay
+data-source-neutral).
 
 Loop: edit the JSON under `docs/grafana/` (or edit in the UI and export it
-there), run `./hack/compose/render-dashboard.sh`, and Grafana reloads within a
-few seconds. Keep each `docs/grafana/*.json` and its copy under
+there), run `./hack/compose/render-dashboard.sh`, and Grafana reloads within
+a few seconds. Keep each `docs/grafana/*.json` and its copy under
 `charts/nvidia-gpu-exporter/dashboards/` byte-identical.

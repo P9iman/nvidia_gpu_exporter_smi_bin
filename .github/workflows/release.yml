@@ -5,108 +5,100 @@ on:
     tags:
       - "v*.*.*"
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: bash --noprofile --norc -euox pipefail {0}
 
 jobs:
   release:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
+    # the release environment holds the signing and publishing secrets. It
+    # admits only v* tags and waits for the maintainer's approval, so a
+    # workflow on any other ref, or a tag pushed with a leaked token, cannot
+    # read them. The tag pattern alone would not be a boundary: a pushed tag
+    # brings its own workflow definition.
+    environment: release
     permissions:
       contents: write # create the GitHub release
       packages: write # push images to GHCR
-      id-token: write # cosign keyless image signing (OIDC)
+      id-token: write # cosign keyless signing (OIDC)
+    outputs:
+      docker_io_: ${{ steps.images.outputs.docker_io_ }}
+      docker_io__nvml: ${{ steps.images.outputs.docker_io__nvml }}
+      ghcr_io_: ${{ steps.images.outputs.ghcr_io_ }}
+      ghcr_io__nvml: ${{ steps.images.outputs.ghcr_io__nvml }}
     steps:
+      # the release tag must carry a signature GitHub verifies against the
+      # pusher's registered keys (any type: SSH, GPG or S/MIME). Checked before
+      # anything is built or published, so an unsigned tag fails fast
+      - name: Check that the release tag is signed, verified and bound to this build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
+          if [ "$(jq -r .object.type <<<"${ref}")" != "tag" ]; then
+            echo "release tag ${GITHUB_REF_NAME} is a lightweight tag; releases need an annotated, signed tag" >&2
+            exit 1
+          fi
+          tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(jq -r .object.sha <<<"${ref}")")"
+          # the signed object must name this tag and point at the commit this
+          # run builds, so a re-pointed ref cannot reuse another tag's signature
+          if [ "$(jq -r .tag <<<"${tag}")" != "${GITHUB_REF_NAME}" ]; then
+            echo "the signed tag object is named '$(jq -r .tag <<<"${tag}")', not ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          if [ "$(jq -r .object.type <<<"${tag}")" != "commit" ] || [ "$(jq -r .object.sha <<<"${tag}")" != "${GITHUB_SHA}" ]; then
+            echo "the signed tag points at $(jq -r .object.sha <<<"${tag}"), this run builds ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          if [ "$(jq -r .verification.verified <<<"${tag}")" != "true" ]; then
+            echo "release tag ${GITHUB_REF_NAME} has no verified signature: $(jq -r .verification.reason <<<"${tag}")" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} carries a verified signature and points at ${GITHUB_SHA}"
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # to be able to generate the full changelog:
           # https://github.com/goreleaser/goreleaser-action/issues/56#issuecomment-568718162
           fetch-depth: 0
+      - name: Check that the released commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "commit ${GITHUB_SHA} is not on main; releases are cut from main only" >&2
+            exit 1
+          fi
       - name: Setup Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.2.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.2.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Login to DockerHub
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: utkuozdemir
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to GHCR
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           # renovate: depName=sigstore/cosign datasource=github-releases
-          cosign-release: v3.1.1
-      - name: Import the signing key
-        # no xtrace: this step handles the private key
-        shell: bash --noprofile --norc -euo pipefail {0}
-        run: |
-          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
-          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
-          gpgconf --kill gpg-agent || true
-          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
-          fpr="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')"
-          # fail loudly if the secret is not the key the docs and chart advertise
-          expected="$(awk '/signKey:/{f=1} f&&/fingerprint:/{print $2; exit}' charts/nvidia-gpu-exporter/Chart.yaml)"
-          if [ "${fpr}" != "${expected}" ]; then
-            echo "imported key ${fpr} does not match the documented fingerprint ${expected}" >&2
-            exit 1
-          fi
-          echo "GPG_FINGERPRINT=${fpr}" >>"${GITHUB_ENV}"
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-      - name: GoReleaser
-        uses: goreleaser/goreleaser-action@v7.2.3
-        with:
-          # renovate: depName=goreleaser/goreleaser datasource=github-releases
-          version: v2.17.0
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PRIVATE_ACCESS_TOKEN: ${{ secrets.PRIVATE_ACCESS_TOKEN }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-      - name: Sign the container images
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          for repo in \
-            docker.io/utkuozdemir/nvidia_gpu_exporter \
-            ghcr.io/utkuozdemir/nvidia_gpu_exporter; do
-            # the tag was just pushed; retry the registry read to avoid a race
-            digest=""
-            for _ in 1 2 3 4 5; do
-              if digest="$(docker buildx imagetools inspect "${repo}:${version}" \
-                --format '{{ .Manifest.Digest }}')"; then
-                break
-              fi
-              sleep 5
-            done
-            if [ -z "${digest}" ]; then
-              echo "could not resolve a digest for ${repo}:${version}" >&2
-              exit 1
-            fi
-            cosign sign --yes "${repo}@${digest}"
-          done
-
-  helm-chart:
-    runs-on: ubuntu-24.04
-    needs: release
-    permissions:
-      contents: write
-      packages: write
-      id-token: write # cosign keyless chart signing (OIDC)
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.0
+          cosign-release: v3.1.3
+      # The chart is packaged and signed here, before anything is published,
+      # so a packaging failure aborts a clean run, and so that the chart job
+      # below needs no secret: this is the only job that reads the GPG key,
+      # and the only one the release environment has to hold for approval.
       - name: Compute chart and app versions from the tag
         run: |
           app_version="${GITHUB_REF_NAME#v}"
@@ -114,21 +106,17 @@ jobs:
           chart_version="$((major + 1)).${minor}.${patch}"
           echo "APP_VERSION=${app_version}" >>"${GITHUB_ENV}"
           echo "CHART_VERSION=${chart_version}" >>"${GITHUB_ENV}"
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+      # a pinned helm, not the runner image's: the packaged chart must not
+      # change because the runner picked up a new helm
+      - name: Install helm
+        uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          # renovate: depName=sigstore/cosign datasource=github-releases
-          cosign-release: v3.1.1
-      - name: Log in to GHCR
-        # before importing the key, so no third-party action runs while the
-        # private key material is present on disk
-        uses: docker/login-action@v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # renovate: depName=helm/helm datasource=github-releases
+          version: v4.3.0
       - name: Import the signing key
-        # no xtrace: this step handles the private key and passphrase
+        # no xtrace: this step handles the private key and passphrase. Every
+        # third-party action of this job has run by now, and the key is
+        # removed again before the next one (goreleaser) starts
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
           mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
@@ -158,6 +146,9 @@ jobs:
           umask 077
           trap 'rm -f /tmp/passphrase.txt' EXIT
           echo "${GPG_PASSPHRASE}" > /tmp/passphrase.txt
+          # reproducible package: helm keeps the checkout's file mtimes in the
+          # tgz, so set them to the commit time first, like every other artifact
+          find charts/nvidia-gpu-exporter -exec touch -d "$(git log -1 --format=%cI)" {} +
           helm package charts/nvidia-gpu-exporter \
             --version "${CHART_VERSION}" \
             --app-version "${APP_VERSION}" \
@@ -170,7 +161,250 @@ jobs:
           cp /tmp/pubkey.asc /tmp/chart-dist/
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      # the private key is not needed past this point; remove it before any
+      # further action runs in this job
+      - name: Remove the signing key material
+        run: rm -rf ~/.gnupg /tmp/secring.gpg
+      # the packaged chart, its provenance file and the repository files, for
+      # the chart job to publish and the attestation job to attest
+      - name: Upload the packaged chart
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chart
+          path: /tmp/chart-dist/
+          if-no-files-found: error
+      # the goreleaser version is declared once, in hack/dev.Dockerfile, so the
+      # version that validates the release config in lint is the version that
+      # builds the release. Fail loudly rather than guessing if that
+      # declaration ever stops being exactly one line.
+      - name: Resolve goreleaser version
+        id: goreleaser_version
+        run: |
+          set -euo pipefail
+          found="$(grep -E '^ARG GORELEASER_VERSION=' hack/dev.Dockerfile || true)"
+          count="$(printf '%s' "${found}" | grep -c . || true)"
+          if [ "${count}" != "1" ]; then
+            echo "expected exactly one ARG GORELEASER_VERSION in hack/dev.Dockerfile, found ${count}" >&2
+            exit 1
+          fi
+          version="${found#ARG GORELEASER_VERSION=}"
+          if ! printf '%s' "${version}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ARG GORELEASER_VERSION is not a pinned version: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+      # goreleaser also signs the checksums file here, keyless with cosign,
+      # see .goreleaser.yml
+      - name: GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: ${{ steps.goreleaser_version.outputs.version }}
+          args: release --clean
+        env:
+          # the tag this run is for, in case another tag lands on the same commit
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRIVATE_ACCESS_TOKEN: ${{ secrets.PRIVATE_ACCESS_TOKEN }}
+      # also when goreleaser failed at a late step (a package manager), after
+      # the release and the images were already published: what is out there
+      # still gets signed and attested
+      - name: Sign the container images
+        id: images
+        if: ${{ !cancelled() }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for repo in \
+            docker.io/utkuozdemir/nvidia_gpu_exporter \
+            ghcr.io/utkuozdemir/nvidia_gpu_exporter; do
+            # sign every published tag variant of this release
+            for tag in "${version}" "${version}-nvml"; do
+              # the tag was just pushed, so the registry read is retried to avoid a race
+              digest=""
+              for _ in 1 2 3 4 5; do
+                if digest="$(docker buildx imagetools inspect "${repo}:${tag}" \
+                  --format '{{ .Manifest.Digest }}')"; then
+                  break
+                fi
+                sleep 5
+              done
+              if [ -z "${digest}" ]; then
+                echo "could not resolve a digest for ${repo}:${tag}" >&2
+                exit 1
+              fi
+              cosign sign --yes "${repo}@${digest}"
+              # hand the digest to the attestation steps below
+              key="$(printf '%s_%s' "${repo%%/*}" "${tag#"${version}"}" | tr -c 'a-zA-Z0-9_\n' '_')"
+              echo "${key}=${digest}" >>"${GITHUB_OUTPUT}"
+            done
+          done
+      # the checksums list feeds the attestation job, which must be able to
+      # run again on its own if the attestation service has a bad moment
+      - name: Upload the checksums for attestation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checksums
+          path: dist/checksums.txt
+          if-no-files-found: error
+
+  # build provenance for every archive and package and for the four image
+  # digests: a signed statement tying each digest to this repository, commit,
+  # workflow and run. A separate job, after publishing and signing, so that
+  # a failure here never leaves a published release unsigned and can be
+  # retried without redoing the release. The images' attestations are stored
+  # in GitHub's attestation store, not pushed to the registries: that is what
+  # `gh attestation verify` reads, and GHCR does not serve the referrers API.
+  attest:
+    runs-on: ubuntu-26.04
+    needs: release
+    # whenever the images were signed, even if the release job then failed at
+    # a package manager step
+    if: ${{ !cancelled() && needs.release.outputs.docker_io_ != '' }}
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the checksums
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: checksums
+      - name: Attest the release files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: checksums.txt
+      - name: Attest the Docker Hub image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: docker.io/utkuozdemir/nvidia_gpu_exporter
+          subject-digest: ${{ needs.release.outputs.docker_io_ }}
+      - name: Attest the Docker Hub nvml image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: docker.io/utkuozdemir/nvidia_gpu_exporter
+          subject-digest: ${{ needs.release.outputs.docker_io__nvml }}
+      - name: Attest the GHCR image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/utkuozdemir/nvidia_gpu_exporter
+          subject-digest: ${{ needs.release.outputs.ghcr_io_ }}
+      - name: Attest the GHCR nvml image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/utkuozdemir/nvidia_gpu_exporter
+          subject-digest: ${{ needs.release.outputs.ghcr_io__nvml }}
+
+  # rebuild the release files from the tag on a second runner and compare
+  # them with what was just published. Identical means this release is
+  # reproducible, shown by a second machine. A difference fails this job
+  # loudly and leaves the published release alone
+  verify-reproducible:
+    runs-on: ubuntu-26.04
+    needs: release
+    # also when the release job failed after publishing (e.g. at a package
+    # manager step): what is published still gets checked
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+    steps:
+      # first, so that a run whose release never got published stops here.
+      # Outside the workspace: the checkout below cleans the workspace and
+      # would delete the download
+      - name: Download the published checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" --pattern checksums.txt --output "${RUNNER_TEMP}/published-checksums.txt"
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # no cache: the point of this job is to rebuild from scratch on a
+          # runner that shares nothing with the release build. The cache key
+          # is only the go.sum hash, so the release job's compiled packages
+          # would otherwise be restored here and the comparison would only
+          # cover the packaging
+          cache: false
+      - name: Resolve goreleaser version
+        id: goreleaser_version
+        run: echo "version=$(sed -n 's/^ARG GORELEASER_VERSION=//p' hack/dev.Dockerfile)" >>"${GITHUB_OUTPUT}"
+      - name: Rebuild the release files
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: ${{ steps.goreleaser_version.outputs.version }}
+          args: release --clean --skip=publish,sign,sbom,docker,announce
+        env:
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          PRIVATE_ACCESS_TOKEN: placeholder
+      - name: Compare with the published checksums
+        run: |
+          if diff "${RUNNER_TEMP}/published-checksums.txt" dist/checksums.txt; then
+            echo "release ${GITHUB_REF_NAME} reproduced byte for byte on a second runner"
+          else
+            echo "release ${GITHUB_REF_NAME} did not reproduce: the artifacts above differ from the published ones, see the rebuilt-release-files artifact of this run" >&2
+            exit 1
+          fi
+      # the whole rebuilt dist, so a difference can be diffed against the
+      # published files without rebuilding anything. artifacts.json in there
+      # records the file info goreleaser applied to every entry. Only when a
+      # rebuild exists, a run whose release was never published stops earlier
+      - name: Keep the rebuilt files for inspection
+        if: failure() && hashFiles('dist/checksums.txt') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rebuilt-release-files
+          path: dist
+          retention-days: 7
+
+  # Publishes the chart the release job packaged and signed. No secret from
+  # the release environment is needed here, the workflow token pushes to GHCR
+  # and gh-pages and cosign signs keyless, so this job does not wait for a
+  # second approval. Still its own job: publishing fails for reasons of its
+  # own (registry, gh-pages) and is then re-run without redoing the release.
+  helm-chart:
+    runs-on: ubuntu-26.04
+    needs: release
+    permissions:
+      contents: write # push to gh-pages
+      packages: write # push the chart to GHCR
+      id-token: write # cosign keyless chart signing (OIDC)
+    outputs:
+      digest: ${{ steps.chart.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compute chart and app versions from the tag
+        run: |
+          app_version="${GITHUB_REF_NAME#v}"
+          IFS=. read -r major minor patch <<<"${app_version}"
+          chart_version="$((major + 1)).${minor}.${patch}"
+          echo "APP_VERSION=${app_version}" >>"${GITHUB_ENV}"
+          echo "CHART_VERSION=${chart_version}" >>"${GITHUB_ENV}"
+      - name: Download the packaged chart
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart
+          path: /tmp/chart-dist
+      - name: Install helm
+        uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # renovate: depName=helm/helm datasource=github-releases
+          version: v4.3.0
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # renovate: depName=sigstore/cosign datasource=github-releases
+          cosign-release: v3.1.3
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push and sign the chart on GHCR
+        id: chart
         # no xtrace: the registry login reads the token on stdin
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
@@ -187,6 +421,7 @@ jobs:
           fi
           cosign sign --yes \
             "ghcr.io/${{ github.repository_owner }}/charts/nvidia-gpu-exporter@${digest}"
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish chart to the Helm repository on gh-pages
@@ -212,3 +447,26 @@ jobs:
           git add ./*.tgz ./*.tgz.prov index.yaml artifacthub-repo.yml pubkey.asc
           git commit -m "publish chart ${CHART_VERSION} (app ${APP_VERSION})"
           git push origin gh-pages
+
+  # build provenance for the chart, the OCI artifact by digest and the
+  # packaged file. Separate job for the same reasons as the attest job above.
+  attest-chart:
+    runs-on: ubuntu-26.04
+    needs: helm-chart
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the packaged chart
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart
+      - name: Attest the OCI chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/utkuozdemir/charts/nvidia-gpu-exporter
+          subject-digest: ${{ needs.helm-chart.outputs.digest }}
+      - name: Attest the packaged chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "*.tgz"

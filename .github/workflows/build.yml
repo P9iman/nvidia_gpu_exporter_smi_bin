@@ -15,6 +15,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -25,87 +28,104 @@ defaults:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Check go.mod tidiness
-        run: go mod tidy --diff
-      - name: Run linters
-        uses: golangci/golangci-lint-action@v9.3.0
-        with:
-          # renovate: depName=golangci/golangci-lint datasource=github-releases
-          version: v2.12.2
-          args: --timeout=3m0s
-          install-mode: goinstall
       - name: Set up Task
-        uses: arduino/setup-task@v3.0.0
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install asset linters
+      # every linter, at the versions pinned in hack/dev.Dockerfile, in the same
+      # containers a developer gets locally. Nothing is installed here, so CI
+      # and a workstation cannot drift apart.
+      - name: Lint
+        run: task lint
+      # the chart's default runAsNonRoot relies on the images carrying a
+      # numeric non-root user. A refactor that drops the directive would pass
+      # every other check and then break every pod at container start.
+      - name: Check that the images keep their non-root user
         run: |
-          # renovate: depName=markdownlint-cli datasource=npm
-          npm install --global markdownlint-cli@0.49.0
-          # renovate: depName=mvdan.cc/sh/v3 datasource=go
-          go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1
-          # "go install" does not work on the dashboard-linter module (it has
-          # replace directives), so install the release binary. The version is
-          # a variable so renovate updates every occurrence in the URL at once.
-          # renovate: depName=grafana/dashboard-linter datasource=github-releases
-          DASHBOARD_LINTER_VERSION=0.2.0
-          curl -sSfL "https://github.com/grafana/dashboard-linter/releases/download/v${DASHBOARD_LINTER_VERSION}/dashboard-linter_${DASHBOARD_LINTER_VERSION}_linux_amd64.tar.gz" | tar -xz -C "$(go env GOPATH)/bin" dashboard-linter
-      - name: Lint markdown and shell scripts
-        run: task lint:assets
-      - name: Lint the Grafana dashboard
-        run: task lint:dashboard
+          grep -q '^USER 65534:65534$' Dockerfile
+          grep -q '^USER 65534:65534$' Dockerfile.nvml
       - name: Run tests
         run: go test -v -race -coverpkg=./... -coverprofile ./coverage.out -covermode=atomic -timeout 20m ./...
       - name: Print coverage results
         run: go tool cover -func ./coverage.out
       - name: Send coverage
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
+      # qemu and buildx so the goreleaser snapshot below can build the
+      # container images for all platforms
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # the goreleaser version is declared once, in hack/dev.Dockerfile, so the
+      # version that validates the release config in lint is the version that
+      # builds the release. Fail loudly rather than guessing if that
+      # declaration ever stops being exactly one line.
+      - name: Resolve goreleaser version
+        id: goreleaser_version
+        run: |
+          set -euo pipefail
+          found="$(grep -E '^ARG GORELEASER_VERSION=' hack/dev.Dockerfile || true)"
+          count="$(printf '%s' "${found}" | grep -c . || true)"
+          if [ "${count}" != "1" ]; then
+            echo "expected exactly one ARG GORELEASER_VERSION in hack/dev.Dockerfile, found ${count}" >&2
+            exit 1
+          fi
+          version="${found#ARG GORELEASER_VERSION=}"
+          if ! printf '%s' "${version}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ARG GORELEASER_VERSION is not a pinned version: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
       # a full snapshot release (unpublished) rather than a single-target
-      # build, so the packaging inputs (systemd unit, nfpm scriptlets) are
-      # validated in CI instead of failing for the first time on a real
-      # release
+      # build, so the packaging inputs (systemd unit, nfpm scriptlets) and
+      # the container images are validated in CI instead of failing for the
+      # first time on a real release. base image digest bumps automerge via
+      # Renovate, so this build is the only gate between a bad digest and a
+      # failed release
       - name: Build and package with Goreleaser
-        uses: goreleaser/goreleaser-action@v7.2.3
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          # renovate: depName=goreleaser/goreleaser datasource=github-releases
-          version: v2.17.0
-          args: release --snapshot --clean --skip=publish,docker,sign,sbom
+          version: ${{ steps.goreleaser_version.outputs.version }}
+          args: release --snapshot --clean --skip=publish,sign,sbom
         env:
           PRIVATE_ACCESS_TOKEN: placeholder
       - name: Check for dirty files
         run: git diff --exit-code
 
   chart:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Set up chart-testing
-        uses: helm/chart-testing-action@v2.8.0
+        uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
       - name: Check that the chart dashboards match docs/grafana/
         run: |
           cmp docs/grafana/dashboard.json charts/nvidia-gpu-exporter/dashboards/nvidia-gpu-metrics.json
           cmp docs/grafana/dashboard-overview.json charts/nvidia-gpu-exporter/dashboards/nvidia-gpu-overview.json
       - name: Lint chart
         run: ct lint --config .ct.yaml --all
+      - name: Validate alert rules
+        run: hack/alerts/verify.sh
       - name: Check that the chart README is current
         run: |
+          # renovate: depName=jnorwood/helm-docs datasource=docker
           docker run --rm -v "$(pwd):/helm-docs" -u "$(id -u)" jnorwood/helm-docs:v1.14.2
           git diff --exit-code charts/
       - name: Create kind cluster
-        uses: helm/kind-action@v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
       - name: Install chart
         run: ct install --config .ct.yaml --all

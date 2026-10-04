@@ -1,10 +1,16 @@
 version: "2"
+run:
+  # The GPU parity test is behind this tag and never runs, so the linter is the
+  # only thing that reads it. Without the tag it was not read at all.
+  build-tags:
+    - gpu
 linters:
   default: all
   disable:
     - depguard # breaking things: https://github.com/atc0005/go-ci/issues/1024
     - err113 # no need to wrap all errors, too much work
     - exhaustruct # pointless
+    - exhaustruct_v5 # pointless
     - wsl # deprecated
     - noinlineerr # enormous fan of inline errors
     - gomodguard # deprecated

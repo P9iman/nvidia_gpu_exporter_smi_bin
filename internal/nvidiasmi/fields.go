@@ -192,8 +192,7 @@ func ParseAutoQFields(
 
 	exitCode := -1
 
-	var exitError *exec.ExitError
-	if errors.As(err, &exitError) {
+	if exitError, ok := errors.AsType[*exec.ExitError](err); ok {
 		exitCode = exitError.ExitCode()
 	}
 
@@ -222,12 +221,25 @@ func ParseAutoQFields(
 	return fields, nil
 }
 
+// ExtractQFields extracts the queryable field names from --help-query-gpu
+// output. A name carrying a comma or a line break is dropped: the query joins
+// the names with commas, so such a name would silently turn into two columns
+// the returned header cannot account for.
 func ExtractQFields(text string) []QField {
 	found := fieldRegex.FindAllStringSubmatch(text, -1)
 
-	fields := make([]QField, len(found))
-	for i, ss := range found {
-		fields[i] = QField(ss[1])
+	fields := make([]QField, 0, len(found))
+
+	for _, ss := range found {
+		if strings.ContainsAny(ss[1], ",\r\n") {
+			continue
+		}
+
+		fields = append(fields, QField(ss[1]))
+	}
+
+	if len(fields) == 0 {
+		return nil
 	}
 
 	return fields
